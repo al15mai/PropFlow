@@ -1,0 +1,1 @@
+UPDATE transactions set subcategory="Electricity", description="Electricity" where subcategory like "Electricitate"
