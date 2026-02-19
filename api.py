@@ -23,7 +23,6 @@ from models import (
     LandlordSettings,
 )
 
-# Database backend (SQLite implementation)
 from db import SQLiteDatabase
 
 db = SQLiteDatabase(path="data.db")
