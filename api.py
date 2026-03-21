@@ -16,14 +16,12 @@ from sqlmodel import Session
 from typing import List, Optional
 
 # Import models
-from PropFlow.models import (
-    Property,
-    Tenant,
-    Transaction,
-    MaintenanceRequest,
-    Alert,
-    LandlordSettings,
-)
+from models.property import Property
+from models.tenant import Tenant
+from models.transaction import Transaction
+from models.maintenance import MaintenanceRequest
+from models.alert import Alert
+from models.settings import LandlordSettings
 
 # Import auth and database
 from auth import get_current_project, get_current_user

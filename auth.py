@@ -11,7 +11,8 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from database import get_session
-from PropFlow.models import User, UserProject
+from models.user import User
+from models.associations import UserProject
 
 # 1. Security Configuration
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")

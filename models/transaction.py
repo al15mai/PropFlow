@@ -29,7 +29,7 @@ class Transaction(SQLModel, table=True):
     attachmentUrl: Optional[str] = None
     isPaid: Optional[bool] = False
     maintenanceId: Optional[str] = Field(
-        default=None, foreign_key="maintenance_request.id"
+        default=None, foreign_key="maintenancerequest.id"
     )
 
     property: Optional["Property"] = Relationship(back_populates="transactions")

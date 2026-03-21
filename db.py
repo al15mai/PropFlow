@@ -9,14 +9,12 @@ from abc import ABC, abstractmethod
 from sqlmodel import Session, select
 
 # Import SQLModel models from models package
-from PropFlow.models import (
-    Property,
-    Tenant,
-    Transaction,
-    MaintenanceRequest,
-    Alert,
-    LandlordSettings,
-)
+from models.property import Property
+from models.tenant import Tenant
+from models.transaction import Transaction
+from models.maintenance import MaintenanceRequest
+from models.alert import Alert
+from models.settings import LandlordSettings
 
 
 class DatabaseInterface(ABC):
