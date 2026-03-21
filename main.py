@@ -1,8 +1,25 @@
-# Add residents association tax a utility type
 # Utilities cost breakdown from landlord dashboard doesn't include all types and it seems a bit crowded (it's always for all properites and a bit small idk)... same goes for Business performance... try to improve these two views
 # View History from properties doesn't do anything in the popup
-# in tenants tab in the table view contract/lease period "2023-01-01 | 2024-01-01" is displayed weird when the page is smaller (the text wraps in rows but dates are split (they shouldn't, try making a small container with 2 rows"
-# landlord settings page has white text on white background in all fields
+
+
+# For tenants side make sure you display the type of expense when they are displayed for paying(the type and the subtype if its like utility... so they don't see only descriptions
+# and on the tenant side in maintenace and transaction history tab if they don't have any data to display for that period make a button to suggest to switch to all years all months near this text "No active maintenance requests for selected period."
+# And display something in their dashboard or some view where it would draw their attention if they are due to pay rent or bills (this should be color coded if the payment is super late red.... if its mid something yellow and if its paid all green
+# Also they should be able to edit the maintance requests or remove them or make them obsolete idk but now on the tenant side once you write it is good as done... can't be changed or anything
+# Also the landlord should be able to change the desctiption or title... add comments which the tenant should see (add some examples like this in data)
+# make team members editable
+# make login work
+# make pagination and api pagination
+# different rent for different periods
+
+
+# While at it make sure you cover the bills if the tenant has the correct credit to cover their expenses and then cover the rent (the rent has to be due just to the current month, if the contract still has a lot more months we expect payment but not for the whole period just till the current day/ current rent).
+# If the balance is enough to cover the rent fully, mark it as Paid.
+# If there is a surplus, keep it as CarryoverCredit for the next period.
+# Technical Specs:
+# Ensure the logic handles Decimal types for financial accuracy (no floating point errors).
+# Create a function allocate_tenant_funds(tenant_id) that returns a summary of what was paid and what remains pending.
+# Provide the React frontend logic (or API response structure) to display to the tenant exactly which bills were "matched" by their payments.
 import os
 import subprocess
 import threading
