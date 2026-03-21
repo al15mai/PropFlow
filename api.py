@@ -10,12 +10,14 @@ Architecture:
 All endpoints enforce project isolation via the database layer.
 """
 
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
-from sqlmodel import Session
+from sqlmodel import Session, select
 from typing import List, Optional
+from pydantic import BaseModel
 
 # Import models
+from models.user import User
 from models.property import Property
 from models.tenant import Tenant
 from models.transaction import Transaction
@@ -24,7 +26,12 @@ from models.alert import Alert
 from models.settings import LandlordSettings
 
 # Import auth and database
-from auth import get_current_project, get_current_user
+from auth import (
+    get_current_project,
+    get_current_user,
+    create_access_token,
+    hash_password,
+)
 from database import get_session, create_db_and_tables
 from db import SQLModelDatabase
 
@@ -55,6 +62,49 @@ def on_startup():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# ===== AUTH =====
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str = "default_password"  # For demo purposes
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user_id: str
+    email: str
+
+
+@app.post("/login", response_model=LoginResponse)
+def login(credentials: LoginRequest, session: Session = Depends(get_session)):
+    """Login endpoint - creates or retrieves user and returns JWT token."""
+    # Check if user exists
+    stmt = select(User).where(User.email == credentials.email)
+    user = session.exec(stmt).first()
+
+    if not user:
+        # Create new user
+        user = User(
+            email=credentials.email,
+            hashed_password=hash_password(credentials.password),
+            is_active=True,
+        )
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+    # Generate JWT token
+    access_token = create_access_token({"sub": user.id})
+
+    return LoginResponse(
+        access_token=access_token,
+        user_id=user.id,
+        email=user.email,
+    )
 
 
 # ===== PROPERTIES =====
