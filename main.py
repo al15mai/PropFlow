@@ -36,12 +36,8 @@ def _start_npm_dev(cwd: Path):
     return subprocess.Popen([npm, "run", "dev"], cwd=str(cwd))
 
 
-def main():
-    root = Path(__file__).resolve().parent
-
-    # Start API as a separate process so it runs independently from npm
+def _start_fastapi(cwd: Path):
     python = sys.executable
-    print(os.getcwd())
     api_cmd = [
         python,
         "-m",
@@ -54,31 +50,37 @@ def main():
         "--reload",
     ]
     try:
-        api_proc = subprocess.Popen(api_cmd, cwd=str(root))
+        api_proc = subprocess.Popen(api_cmd, cwd=str(cwd))
     except Exception as e:
         print(f"Failed to start API process: {e}", file=sys.stderr)
         api_proc = None
 
-    npm_proc = _start_npm_dev(root)
+    return api_proc
 
+
+def main():
+    root = Path(__file__).resolve().parent
+
+    print(os.getcwd())
+
+    # Start processes so they run independently from npm
+    processes = {"npm": _start_npm_dev(root), "api": _start_fastapi(root)}
     try:
         # Wait for either process to exit; if one exits, shut down the other.
         while True:
-            api_ret = api_proc.poll() if api_proc else None
-            npm_ret = npm_proc.poll() if npm_proc else None
-            if api_ret is not None:
-                print(f"API process exited with {api_ret}")
-                break
-            if npm_ret is not None:
-                print(f"npm process exited with {npm_ret}")
-                break
+            polls = {
+                key: proc.poll() if proc else None for key, proc in processes.items()
+            }
+            for key, ret in polls.items():
+                if ret is not None:
+                    print(f"{key} process exited with {ret}")
+                    return
             # small sleep to avoid busy loop
             threading.Event().wait(2)
     except KeyboardInterrupt:
         sys.exit(0)
     finally:
-        if npm_proc and npm_proc.poll() is None:
-            npm_proc.terminate()
-        if api_proc and api_proc.poll() is None:
-            api_proc.terminate()
+        for key, proc in processes.items():
+            if proc and proc.poll() is None:
+                proc.terminate()
         sys.exit(0)
