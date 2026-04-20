@@ -68,12 +68,9 @@ def main():
     try:
         # Wait for either process to exit; if one exits, shut down the other.
         while True:
-            polls = {
-                key: proc.poll() if proc else None for key, proc in processes.items()
-            }
-            for key, ret in polls.items():
-                if ret is not None:
-                    print(f"{key} process exited with {ret}")
+            for key, proc in processes.items():
+                if proc and proc.poll() is not None:
+                    print(f"{key} process exited with {proc.returncode}")
                     return
             # small sleep to avoid busy loop
             threading.Event().wait(2)
