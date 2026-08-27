@@ -29,6 +29,7 @@ from models import (
 )
 
 from db import SQLiteDatabase
+from system_update import get_git_status
 
 # The DB path is anchored to this file, NOT the process cwd. There used to be a
 # second, empty `data.db` at the repo root that got picked up whenever the server
@@ -49,6 +50,12 @@ def now_iso():
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+# Running git identity of this backend, for the Settings > Version card (task D5).
+@app.get("/admin/version")
+def admin_version():
+    return get_git_status()
 
 
 # --- Properties ---
