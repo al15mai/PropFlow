@@ -37,8 +37,10 @@ ExpenseCategory = Literal[
     "Utilities",
     "Mortgage",
     "Other",
+    "Rent",
+    "Deposit",
 ]
-PaymentMethod = Literal["Cash", "Transfer", "Check"]
+PaymentMethod = Literal["Cash", "Transfer", "Check", "System"]
 
 
 class Transaction(BaseModel):
@@ -48,13 +50,17 @@ class Transaction(BaseModel):
     type: TransactionType
     category: Optional[ExpenseCategory] = None
     subcategory: Optional[str] = None
-    description: str
+    description: Optional[str] = ""
+    projectId: Optional[str] = None
     propertyId: Optional[str] = None
     tenantId: Optional[str] = None
     paymentMethod: PaymentMethod
     isReimbursable: Optional[bool] = False
     attachmentUrl: Optional[str] = None
     isPaid: Optional[bool] = False
+
+    class Config:
+        extra = "ignore"
 
 
 RequestPriority = Literal["Low", "Medium", "High", "Emergency"]

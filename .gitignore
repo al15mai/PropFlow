@@ -1,4 +1,9 @@
 notes.txt
 test.py
 *.pyc
+__pycache__/
+.pytest_cache/
+.venv/
 data.db
+data.test.db
+*.test.db

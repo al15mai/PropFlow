@@ -126,8 +126,7 @@ class SQLiteDatabase(DatabaseInterface):
 
     def initialize(self) -> None:
         cur = self._cursor()
-        cur.execute(
-            """
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS properties (
                 id TEXT PRIMARY KEY,
                 address TEXT,
@@ -138,10 +137,8 @@ class SQLiteDatabase(DatabaseInterface):
                 status TEXT,
                 type TEXT,
                 image TEXT
-            )"""
-        )
-        cur.execute(
-            """
+            )""")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS tenants (
                 id TEXT PRIMARY KEY,
                 propertyId TEXT,
@@ -152,10 +149,8 @@ class SQLiteDatabase(DatabaseInterface):
                 leaseEnd TEXT,
                 deposit REAL,
                 status TEXT
-            )"""
-        )
-        cur.execute(
-            """
+            )""")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
                 id TEXT PRIMARY KEY,
                 date TEXT,
@@ -170,10 +165,8 @@ class SQLiteDatabase(DatabaseInterface):
                 isReimbursable INTEGER,
                 attachmentUrl TEXT,
                 isPaid INTEGER
-            )"""
-        )
-        cur.execute(
-            """
+            )""")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS maintenance (
                 id TEXT PRIMARY KEY,
                 propertyId TEXT,
@@ -183,20 +176,16 @@ class SQLiteDatabase(DatabaseInterface):
                 priority TEXT,
                 status TEXT,
                 dateReported TEXT
-            )"""
-        )
-        cur.execute(
-            """
+            )""")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS alerts (
                 id TEXT PRIMARY KEY,
                 type TEXT,
                 message TEXT,
                 severity TEXT,
                 date TEXT
-            )"""
-        )
-        cur.execute(
-            """
+            )""")
+        cur.execute("""
             CREATE TABLE IF NOT EXISTS settings (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 displayName TEXT,
@@ -205,8 +194,7 @@ class SQLiteDatabase(DatabaseInterface):
                 companyName TEXT,
                 currency TEXT,
                 language TEXT
-            )"""
-        )
+            )""")
         assert self.conn is not None
         self.conn.commit()
 
@@ -367,8 +355,21 @@ class SQLiteDatabase(DatabaseInterface):
         rows = cur.execute(q, params).fetchall()
         return [Transaction(**self._row_to_dict(r)) for r in rows]
 
+    def _resolve_property_id(self, tx: Transaction) -> Optional[str]:
+        """A tenant-linked transaction belongs to that tenant's property. Fill it in
+        when the client didn't, so per-property views/filters stay correct
+        (see migration 001 / tasks A2, A3)."""
+        if tx.propertyId or not tx.tenantId:
+            return tx.propertyId
+        cur = self._cursor()
+        row = cur.execute(
+            "SELECT propertyId FROM tenants WHERE id = ?", (tx.tenantId,)
+        ).fetchone()
+        return row[0] if row and row[0] else tx.propertyId
+
     def create_transaction(self, tx: Transaction) -> Transaction:
         cur = self._cursor()
+        tx.propertyId = self._resolve_property_id(tx)
         cur.execute(
             "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
@@ -378,7 +379,7 @@ class SQLiteDatabase(DatabaseInterface):
                 tx.type,
                 tx.category,
                 tx.subcategory,
-                tx.description,
+                tx.description or "",
                 tx.propertyId,
                 tx.tenantId,
                 tx.paymentMethod,
@@ -393,6 +394,7 @@ class SQLiteDatabase(DatabaseInterface):
 
     def update_transaction(self, id: str, tx: Transaction) -> Transaction:
         cur = self._cursor()
+        tx.propertyId = self._resolve_property_id(tx)
         cur.execute(
             "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=? WHERE id=?",
             (
@@ -401,7 +403,7 @@ class SQLiteDatabase(DatabaseInterface):
                 tx.type,
                 tx.category,
                 tx.subcategory,
-                tx.description,
+                tx.description or "",
                 tx.propertyId,
                 tx.tenantId,
                 tx.paymentMethod,

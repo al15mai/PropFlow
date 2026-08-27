@@ -1,5 +1,10 @@
-from fastapi import FastAPI, HTTPException
+import os
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from typing import List, Optional
 from datetime import datetime
 
@@ -25,7 +30,14 @@ from models import (
 
 from db import SQLiteDatabase
 
-db = SQLiteDatabase(path="data.db")
+# The DB path is anchored to this file, NOT the process cwd. There used to be a
+# second, empty `data.db` at the repo root that got picked up whenever the server
+# was started from the wrong directory (see task C5 / CLAUDE.md "Which database is
+# real?"). `PROPFLOW_DB` overrides it — the test suite points it at a throwaway
+# tmp file so importing this module never touches production data.
+DB_PATH = os.environ.get("PROPFLOW_DB") or str(Path(__file__).resolve().parent / "data.db")
+
+db = SQLiteDatabase(path=DB_PATH)
 db.initialize()
 
 
@@ -115,6 +127,20 @@ def list_transactions(
 def create_transaction(tx: Transaction):
     db.create_transaction(tx)
     return tx
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    print("Validation error for request:", request.method, request.url)
+    print("Body:", await request.body())
+    print("Errors:", exc.errors())
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": exc.errors(),
+            "body": exc.body,
+        },
+    )
 
 
 @app.put("/transactions/{id}", response_model=Transaction)

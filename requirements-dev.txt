@@ -1,0 +1,8 @@
+# Runtime deps (not pinned upstream at V0.0.1 - these are what the code needs).
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.12.5
+
+# Test-only
+pytest>=8
+httpx>=0.27
