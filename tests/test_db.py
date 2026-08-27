@@ -105,6 +105,40 @@ def test_update_missing_transaction_raises_keyerror(database):
         database.update_transaction("nope", mk(id="nope"))
 
 
+# --- multi-currency columns (task A4) ---------------------------------------
+
+def test_currency_defaults_backfilled_for_legacy_style_row(database):
+    """A row created without currency info is treated as base: fxRate 1, amountBase == amount."""
+    database.create_transaction(mk(amount=100.0))
+    (got,) = database.list_transactions()
+    assert got.fxRate == 1.0
+    assert got.amountBase == 100.0
+    assert got.currency is None
+
+
+def test_currency_fields_roundtrip(database):
+    database.create_transaction(mk(id="eur", amount=300.0, currency="EUR", fxRate=5.06))
+    (got,) = database.list_transactions()
+    assert got.currency == "EUR"
+    assert got.fxRate == 5.06
+    assert got.amountBase == 1518.0  # 300 * 5.06, derived server-side
+
+
+def test_explicit_amount_base_is_respected(database):
+    """The landlord can pin the exact RON they received instead of amount*fxRate."""
+    database.create_transaction(mk(id="p", amount=1000.0, currency="EUR", fxRate=5.0, amountBase=4980.0))
+    (got,) = database.list_transactions()
+    assert got.amountBase == 4980.0
+
+
+def test_update_recomputes_amount_base(database):
+    database.create_transaction(mk(id="x", amount=100.0))
+    database.update_transaction("x", mk(id="x", amount=200.0, currency="EUR", fxRate=5.0))
+    (got,) = database.list_transactions()
+    assert got.amountBase == 1000.0
+    assert got.currency == "EUR"
+
+
 def test_delete_transaction(database):
     database.create_transaction(mk())
     database.delete_transaction("tx1")

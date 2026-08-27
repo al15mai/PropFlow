@@ -136,7 +136,8 @@ class SQLiteDatabase(DatabaseInterface):
                 currency TEXT,
                 status TEXT,
                 type TEXT,
-                image TEXT
+                image TEXT,
+                fxRate REAL
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tenants (
@@ -164,7 +165,10 @@ class SQLiteDatabase(DatabaseInterface):
                 paymentMethod TEXT,
                 isReimbursable INTEGER,
                 attachmentUrl TEXT,
-                isPaid INTEGER
+                isPaid INTEGER,
+                currency TEXT,
+                fxRate REAL,
+                amountBase REAL
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS maintenance (
@@ -223,7 +227,7 @@ class SQLiteDatabase(DatabaseInterface):
     def create_property(self, p: Property) -> Property:
         cur = self._cursor()
         cur.execute(
-            "INSERT INTO properties (id,address,unitNumber,rooms,rentAmount,currency,status,type,image) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO properties (id,address,unitNumber,rooms,rentAmount,currency,status,type,image,fxRate) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 p.id,
                 p.address,
@@ -234,6 +238,7 @@ class SQLiteDatabase(DatabaseInterface):
                 p.status,
                 p.type,
                 p.image,
+                p.fxRate,
             ),
         )
         assert self.conn is not None
@@ -243,7 +248,7 @@ class SQLiteDatabase(DatabaseInterface):
     def update_property(self, id: str, p: Property) -> Property:
         cur = self._cursor()
         cur.execute(
-            "UPDATE properties SET address=?,unitNumber=?,rooms=?,rentAmount=?,currency=?,status=?,type=?,image=? WHERE id=?",
+            "UPDATE properties SET address=?,unitNumber=?,rooms=?,rentAmount=?,currency=?,status=?,type=?,image=?,fxRate=? WHERE id=?",
             (
                 p.address,
                 p.unitNumber,
@@ -253,6 +258,7 @@ class SQLiteDatabase(DatabaseInterface):
                 p.status,
                 p.type,
                 p.image,
+                p.fxRate,
                 id,
             ),
         )
@@ -367,11 +373,22 @@ class SQLiteDatabase(DatabaseInterface):
         ).fetchone()
         return row[0] if row and row[0] else tx.propertyId
 
+    @staticmethod
+    def _currency_fields(tx: Transaction) -> tuple:
+        """Normalize the multi-currency triple (task A4): fxRate defaults to 1,
+        amountBase is derived from amount * fxRate when the client didn't send it.
+        `currency` is stored as given (None == base currency)."""
+        fx = tx.fxRate if tx.fxRate else 1.0
+        base = tx.amountBase if tx.amountBase is not None else round((tx.amount or 0) * fx, 2)
+        return tx.currency, fx, base
+
     def create_transaction(self, tx: Transaction) -> Transaction:
         cur = self._cursor()
         tx.propertyId = self._resolve_property_id(tx)
+        currency, fx_rate, amount_base = self._currency_fields(tx)
+        tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid,currency,fxRate,amountBase) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tx.id,
                 tx.date,
@@ -386,6 +403,9 @@ class SQLiteDatabase(DatabaseInterface):
                 int(bool(tx.isReimbursable)),
                 tx.attachmentUrl,
                 int(bool(tx.isPaid)),
+                currency,
+                fx_rate,
+                amount_base,
             ),
         )
         assert self.conn is not None
@@ -395,8 +415,10 @@ class SQLiteDatabase(DatabaseInterface):
     def update_transaction(self, id: str, tx: Transaction) -> Transaction:
         cur = self._cursor()
         tx.propertyId = self._resolve_property_id(tx)
+        currency, fx_rate, amount_base = self._currency_fields(tx)
+        tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=? WHERE id=?",
+            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=?,currency=?,fxRate=?,amountBase=? WHERE id=?",
             (
                 tx.date,
                 tx.amount,
@@ -410,6 +432,9 @@ class SQLiteDatabase(DatabaseInterface):
                 int(bool(tx.isReimbursable)),
                 tx.attachmentUrl,
                 int(bool(tx.isPaid)),
+                currency,
+                fx_rate,
+                amount_base,
                 id,
             ),
         )

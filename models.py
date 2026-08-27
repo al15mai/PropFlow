@@ -15,6 +15,12 @@ class Property(BaseModel):
     status: PropertyStatus
     type: PropertyType
     image: Optional[str] = None
+    # RON (landlord base) per 1 unit of `currency`. None / 1.0 for RON properties.
+    # Used to value this property's rent obligation in base currency (task A4).
+    fxRate: Optional[float] = None
+
+    class Config:
+        extra = "ignore"
 
 
 class Tenant(BaseModel):
@@ -58,6 +64,10 @@ class Transaction(BaseModel):
     isReimbursable: Optional[bool] = False
     attachmentUrl: Optional[str] = None
     isPaid: Optional[bool] = False
+    # Multi-currency (task A4). Legacy rows leave these null and are treated as base (RON).
+    currency: Optional[str] = None          # currency `amount` is denominated in
+    fxRate: Optional[float] = None          # RON (base) per 1 unit of `currency`
+    amountBase: Optional[float] = None      # amount * fxRate, i.e. the value in RON
 
     class Config:
         extra = "ignore"
