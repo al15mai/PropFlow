@@ -85,18 +85,36 @@ def _client_for(provider: str):
     return _clients[provider]
 
 
+# Worker-maintained readiness cache. NEVER call a client method from a request
+# thread — Playwright's sync API pins objects to their creating (worker) thread,
+# and one cross-thread touch poisons the whole dispatcher ("Cannot switch to a
+# different thread"). `status()` reads this dict; only worker-thread code writes it.
+_last_ready: dict = {}
+
+
 def run_text(func: Callable, *, provider: str | None = None, timeout_s: float | None = None):
     """Run ``func(client)`` on the text provider's dedicated worker thread.
 
-    ``func`` gets the ready client and returns whatever the caller needs;
-    it must be a whole task (one ask + parse), not a partial step.
+    ``func`` gets the client and returns whatever the caller needs; it must be
+    a whole task (one ask + parse), not a partial step.
     """
     provider = provider or text_provider()
     worker = _worker_for(provider)
     budget = timeout_s if timeout_s is not None else env_float("AI_TASK_TIMEOUT_S", 300.0)
 
     def _task():
-        return func(_client_for(provider))
+        client = _client_for(provider)
+        try:
+            result = func(client)
+        except Exception:
+            # readiness is refreshed on the worker thread only — safe here
+            try:
+                _last_ready[provider] = client.is_ready()
+            except Exception:
+                _last_ready[provider] = False
+            raise
+        _last_ready[provider] = True
+        return result
 
     return worker.run(_task, timeout_s=budget)
 
@@ -116,7 +134,7 @@ def login(provider: str, timeout_s: int = 300) -> dict:
 
 
 def status() -> dict:
-    """Cheap snapshot for GET /ai/status — never launches a browser."""
+    """Cheap snapshot for GET /ai/status. Never touches a client (see `_last_ready`)."""
     try:
         import playwright  # noqa: F401
 
@@ -124,20 +142,16 @@ def status() -> dict:
     except ImportError:
         playwright_installed = False
 
-    providers = {}
-    for p in _VALID_PROVIDERS:
-        client = _clients.get(p)
-        providers[p] = {
-            "clientBuilt": client is not None,
-            "ready": bool(client and client.is_ready()),
-        }
     return {
         "playwrightInstalled": playwright_installed,
         "textProvider": text_provider(),
         "invoiceMode": feature_mode("invoice"),
         "messageMode": feature_mode("message"),
         "headless": _headless(),
-        "providers": providers,
+        "providers": {
+            p: {"clientBuilt": p in _clients, "ready": bool(_last_ready.get(p))}
+            for p in _VALID_PROVIDERS
+        },
     }
 
 
@@ -151,4 +165,5 @@ def reset() -> None:
             pass
     _clients.clear()
     _workers.clear()
+    _last_ready.clear()
     _playwright_checked = False

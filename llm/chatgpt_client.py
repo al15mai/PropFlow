@@ -120,11 +120,22 @@ class ChatGPTClient(BrowserLLM):
         self._launch()
         self._open_page()
 
+    def _logged_in(self) -> bool:
+        try:
+            url = self.page.url or ""
+            if "auth.openai.com" in url or "/auth/login" in url:
+                return False
+            if "chatgpt.com" not in url and "chat.openai.com" not in url:
+                return False
+            return first_visible(self.page, PROMPT_INPUT_SELECTORS) is not None
+        except Exception:
+            return False
+
     def ensure_logged_in(self, timeout_s: int = 300) -> bool:
         self._ensure_browser()
         deadline = time.time() + timeout_s
         while time.time() < deadline:
-            if first_visible(self.page, PROMPT_INPUT_SELECTORS):
+            if self._logged_in():
                 return True
             time.sleep(2)
         raise LLMNotLoggedIn(
@@ -133,15 +144,12 @@ class ChatGPTClient(BrowserLLM):
         )
 
     def is_ready(self) -> bool:
-        try:
-            return (
-                self._browser is not None
-                and self.page is not None
-                and not self.page.is_closed()
-                and first_visible(self.page, PROMPT_INPUT_SELECTORS) is not None
-            )
-        except Exception:
-            return False
+        return (
+            self._browser is not None
+            and self.page is not None
+            and not self.page.is_closed()
+            and self._logged_in()
+        )
 
     def close(self) -> None:
         try:
