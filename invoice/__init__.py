@@ -23,10 +23,13 @@ from .templates import (
     Anchor,
     STARTER_TEMPLATES,
     Template,
+    TemplateSpecError,
+    anchor_from_spec,
     apply_template,
     match_template,
     parse_date,
     parse_money,
+    template_from_spec,
 )
 
 __all__ = [
@@ -38,9 +41,12 @@ __all__ = [
     "redact",
     "Anchor",
     "Template",
+    "TemplateSpecError",
     "STARTER_TEMPLATES",
+    "anchor_from_spec",
     "apply_template",
     "match_template",
     "parse_date",
     "parse_money",
+    "template_from_spec",
 ]

@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from uuid import uuid4
 
+import json
+
 from models import (
     Property,
     Tenant,
@@ -13,6 +15,7 @@ from models import (
     Alert,
     LandlordSettings,
     Document,
+    InvoiceTemplate,
 )
 
 
@@ -229,6 +232,18 @@ class SQLiteDatabase(DatabaseInterface):
                 url TEXT,
                 sha256 TEXT,
                 note TEXT,
+                createdAt TEXT
+            )""")
+        # Per-vendor invoice-parsing rules authored in the app (task E7).
+        # `spec` is JSON: {vendor, match:[phrase], category?, subcategory?,
+        #  fields:{name:{after,kind}}}. Migration 008 adds this to the live DB.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS invoice_templates (
+                id TEXT PRIMARY KEY,
+                vendor TEXT,
+                spec TEXT,
+                source TEXT,
+                projectId TEXT,
                 createdAt TEXT
             )""")
         assert self.conn is not None
@@ -696,3 +711,69 @@ class SQLiteDatabase(DatabaseInterface):
         assert self.conn is not None
         self.conn.commit()
         return doc
+
+    # --- Invoice templates (task E7) ---
+    @staticmethod
+    def _row_to_template(row: sqlite3.Row) -> InvoiceTemplate:
+        d = {k: row[k] for k in row.keys()}
+        d["spec"] = json.loads(d["spec"]) if d.get("spec") else {}
+        return InvoiceTemplate(**d)
+
+    def create_invoice_template(self, t: InvoiceTemplate) -> InvoiceTemplate:
+        cur = self._cursor()
+        cur.execute(
+            "INSERT INTO invoice_templates (id,vendor,spec,source,projectId,createdAt) "
+            "VALUES (?,?,?,?,?,?)",
+            (t.id, t.vendor, json.dumps(t.spec), t.source, t.projectId, t.createdAt),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+        return t
+
+    def get_invoice_template(self, id: str) -> Optional[InvoiceTemplate]:
+        row = self._cursor().execute(
+            "SELECT * FROM invoice_templates WHERE id = ?", (id,)
+        ).fetchone()
+        return self._row_to_template(row) if row else None
+
+    def list_invoice_templates(self, projectId: Optional[str] = None) -> List[InvoiceTemplate]:
+        cur = self._cursor()
+        where, params = self._project_filter(projectId)
+        q = "SELECT * FROM invoice_templates"
+        if where:
+            q += " WHERE " + where
+        q += " ORDER BY createdAt DESC"
+        return [self._row_to_template(r) for r in cur.execute(q, params).fetchall()]
+
+    def update_invoice_template(self, id: str, **fields) -> InvoiceTemplate:
+        allowed = {"vendor", "spec", "source"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            got = self.get_invoice_template(id)
+            if got is None:
+                raise KeyError("Invoice template not found")
+            return got
+        if "spec" in sets:
+            sets["spec"] = json.dumps(sets["spec"])
+        cur = self._cursor()
+        cur.execute(
+            f"UPDATE invoice_templates SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
+            (*sets.values(), id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError("Invoice template not found")
+        assert self.conn is not None
+        self.conn.commit()
+        got = self.get_invoice_template(id)
+        assert got is not None
+        return got
+
+    def delete_invoice_template(self, id: str) -> Optional[InvoiceTemplate]:
+        got = self.get_invoice_template(id)
+        if got is None:
+            return None
+        cur = self._cursor()
+        cur.execute("DELETE FROM invoice_templates WHERE id = ?", (id,))
+        assert self.conn is not None
+        self.conn.commit()
+        return got

@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 
 PropertyStatus = Literal["Occupied", "Vacant", "Maintenance"]
 PropertyType = Literal["Rental", "Personal"]
@@ -149,3 +149,37 @@ class Document(BaseModel):
 
     class Config:
         extra = "ignore"
+
+
+class InvoiceTemplate(BaseModel):
+    """A per-vendor invoice-parsing rule authored in the app (task E7).
+
+    `spec` is the rule itself: {vendor, match: [phrase], category?, subcategory?,
+    fields: {name: {after, kind}}}. Its `after`/`match` phrases are treated as
+    literal text (not regex) so a user can't inject a catastrophic pattern.
+    `source` is "user" (hand-authored) or "auto" (saved from an LLM field-locate).
+    """
+    id: str = ""          # server-assigned on create
+    vendor: str
+    spec: Dict[str, Any]
+    source: Literal["user", "auto"] = "user"
+    # Workspace this belongs to (task D4b). Null = shared across projects.
+    projectId: Optional[str] = None
+    createdAt: str = ""    # server-assigned on create
+
+    class Config:
+        extra = "ignore"
+
+
+class InvoiceExtraction(BaseModel):
+    """Result of running the extraction pipeline over one invoice (task E7).
+
+    `parsed` matches the frontend `ParsedInvoice` shape; `needsReview` lists the
+    fields the user must confirm (low confidence or not found); `dueDate` is a
+    bonus the templates pull that `ParsedInvoice` doesn't carry.
+    """
+    parsed: Dict[str, Any]
+    needsReview: List[str] = []
+    templateVendor: Optional[str] = None
+    dueDate: Optional[str] = None
+    source: str = "template"  # "template" | "model" | "manual"

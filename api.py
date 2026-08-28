@@ -1,5 +1,6 @@
 import hashlib
 import os
+import re
 import uuid
 from pathlib import Path
 
@@ -29,6 +30,8 @@ from models import (
     Alert,
     LandlordSettings,
     Document,
+    InvoiceTemplate,
+    InvoiceExtraction,
 )
 
 from db import SQLiteDatabase
@@ -332,6 +335,138 @@ def delete_document(id: str):
     doc = db.delete_document(id)
     if doc and doc.storage == "file" and doc.path:
         (_uploads_dir() / doc.path).unlink(missing_ok=True)
+    return
+
+
+# --- Invoice OCR / quick cost entry (task E7) -------------------------------
+#
+# Extraction runs server-side (E7 decision). PDF-first: pull the text layer,
+# redact PII (mandatory before this text could ever reach an LLM), then match a
+# per-vendor template. Image / link invoices fall through to needs-review until
+# the E5 model fallback lands. Nothing is written — the frontend confirms the
+# fields and creates the transaction itself.
+
+def _split_names(raw: Optional[str]) -> list:
+    return [p.strip() for p in (raw or "").replace(";", ",").split(",") if p.strip()]
+
+
+def _load_project_templates(project_id: Optional[str]):
+    from invoice.templates import TemplateSpecError, template_from_spec
+
+    out = []
+    for row in db.list_invoice_templates(project_id):
+        try:
+            out.append(template_from_spec(row.spec, source=row.source))
+        except TemplateSpecError:
+            continue  # a broken saved template shouldn't break extraction
+    return out
+
+
+def _extract_from_text(text: str, *, names, places, project_id) -> InvoiceExtraction:
+    from invoice import extract, redact
+
+    red = redact(text, names=names, extra=[re.escape(p) for p in places])
+    res = extract(red.text, templates=_load_project_templates(project_id))
+    return InvoiceExtraction(
+        parsed=res.to_parsed_invoice(),
+        needsReview=sorted(res.needs_review),
+        templateVendor=res.template,
+        dueDate=res.due_date,
+        source=res.source,
+    )
+
+
+@app.post("/invoices/extract", response_model=InvoiceExtraction)
+async def extract_invoice(
+    file: Optional[UploadFile] = File(None),
+    documentId: Optional[str] = Form(None),
+    names: Optional[str] = Form(None),   # tenant/owner names to scrub, comma-sep
+    places: Optional[str] = Form(None),  # property city/county to scrub, comma-sep
+    projectId: Optional[str] = Form(None),
+):
+    names_list = _split_names(names)
+    places_list = _split_names(places)
+
+    data: Optional[bytes] = None
+    is_pdf = False
+    if file is not None:
+        data = await file.read()
+        is_pdf = (file.content_type == "application/pdf") or data[:5] == b"%PDF-"
+    elif documentId:
+        doc = db.get_document(documentId)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if doc.storage != "file" or not doc.path:
+            # a link document — fetching it is the E5 fallback's job
+            return InvoiceExtraction(
+                parsed={"vendor": "", "amount": 0, "date": "", "category": "Utilities",
+                        "subcategory": None, "description": ""},
+                needsReview=["vendor", "amount", "date"], source="manual",
+            )
+        fp = _uploads_dir() / doc.path
+        if not fp.exists():
+            raise HTTPException(status_code=410, detail="File missing on disk")
+        data = fp.read_bytes()
+        is_pdf = (doc.mime == "application/pdf") or data[:5] == b"%PDF-"
+    else:
+        raise HTTPException(status_code=422, detail="provide a file or a documentId")
+
+    if not is_pdf:
+        # image invoice — needs the E5 model path; return an empty shell to fill in
+        return InvoiceExtraction(
+            parsed={"vendor": "", "amount": 0, "date": "", "category": "Utilities",
+                    "subcategory": None, "description": ""},
+            needsReview=["vendor", "amount", "date"], source="manual",
+        )
+
+    from invoice import pdf_to_text
+
+    try:
+        text = pdf_to_text(data)
+    except Exception:
+        raise HTTPException(status_code=422, detail="could not read the PDF")
+
+    return _extract_from_text(text, names=names_list, places=places_list, project_id=projectId)
+
+
+@app.get("/invoice-templates", response_model=List[InvoiceTemplate])
+def list_invoice_templates(projectId: Optional[str] = None):
+    return db.list_invoice_templates(projectId)
+
+
+@app.post("/invoice-templates", response_model=InvoiceTemplate, status_code=201)
+def create_invoice_template(t: InvoiceTemplate):
+    from invoice.templates import TemplateSpecError, template_from_spec
+
+    try:
+        template_from_spec(t.spec, source=t.source)  # validate before storing
+    except TemplateSpecError as e:
+        raise HTTPException(status_code=422, detail=f"bad template: {e}")
+    if not t.id:
+        t.id = uuid.uuid4().hex
+    if not t.createdAt:
+        t.createdAt = now_iso()
+    return db.create_invoice_template(t)
+
+
+@app.put("/invoice-templates/{id}", response_model=InvoiceTemplate)
+def update_invoice_template(id: str, patch: dict):
+    from invoice.templates import TemplateSpecError, template_from_spec
+
+    if "spec" in patch:
+        try:
+            template_from_spec(patch["spec"], source=patch.get("source", "user"))
+        except TemplateSpecError as e:
+            raise HTTPException(status_code=422, detail=f"bad template: {e}")
+    try:
+        return db.update_invoice_template(id, **patch)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Invoice template not found")
+
+
+@app.delete("/invoice-templates/{id}", status_code=204)
+def delete_invoice_template(id: str):
+    db.delete_invoice_template(id)
     return
 
 

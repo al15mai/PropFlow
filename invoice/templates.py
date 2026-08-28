@@ -130,6 +130,86 @@ def match_template(text: str, templates=None):
     return best
 
 
+# --- (de)serialisation for user / auto templates (task E7, DB-backed) ---
+#
+# User templates are authored in the app. Their ``after`` / ``match`` values are
+# treated as **literal phrases**, not regexes — we ``re.escape(fold(...))`` them.
+# That removes any ReDoS surface from user input; the built-in starter templates
+# keep full regex power because they are trusted code.
+
+_MAX_MATCH = 8
+_MAX_FIELDS = 8
+_ALLOWED_FIELD_NAMES = {"amount", "date", "due_date", "account", "reference"}
+
+
+class TemplateSpecError(ValueError):
+    """A user-supplied template spec is malformed."""
+
+
+def _literal(phrase: str) -> str:
+    phrase = str(phrase).strip()
+    if not phrase:
+        raise TemplateSpecError("empty phrase")
+    return re.escape(fold(phrase))
+
+
+def anchor_from_spec(d: dict) -> Anchor:
+    if not isinstance(d, dict) or "after" not in d:
+        raise TemplateSpecError("anchor needs an 'after' phrase")
+    kind = d.get("kind", "money")
+    if kind not in ("money", "date"):
+        raise TemplateSpecError(f"bad anchor kind {kind!r}")
+    window = int(d.get("window", 160))
+    occurrence = int(d.get("occurrence", 1))
+    if not (10 <= window <= 2000) or not (1 <= occurrence <= 20):
+        raise TemplateSpecError("anchor window/occurrence out of range")
+    return Anchor(
+        after=_literal(d["after"]), kind=kind, window=window,
+        occurrence=occurrence, reliable=bool(d.get("reliable", True)),
+    )
+
+
+def template_from_spec(spec: dict, *, source: str = "user") -> Template:
+    """Build a Template from the JSON the frontend / auto-detect stores.
+
+    ``spec`` = {vendor, match: [phrase], category?, subcategory?,
+                fields: {name: anchorSpec | [anchorSpec]}}
+    """
+    if not isinstance(spec, dict):
+        raise TemplateSpecError("spec must be an object")
+    vendor = str(spec.get("vendor", "")).strip()
+    if not vendor:
+        raise TemplateSpecError("template needs a vendor")
+
+    match = spec.get("match") or []
+    if not isinstance(match, list) or not match:
+        raise TemplateSpecError("template needs at least one match phrase")
+    if len(match) > _MAX_MATCH:
+        raise TemplateSpecError("too many match phrases")
+    match_patterns = [_literal(m) for m in match]
+
+    raw_fields = spec.get("fields") or {}
+    if not isinstance(raw_fields, dict) or not raw_fields:
+        raise TemplateSpecError("template needs at least one field")
+    if len(raw_fields) > _MAX_FIELDS:
+        raise TemplateSpecError("too many fields")
+    fields: dict = {}
+    for name, anchors in raw_fields.items():
+        if name not in _ALLOWED_FIELD_NAMES:
+            raise TemplateSpecError(f"unknown field {name!r}")
+        seq = anchors if isinstance(anchors, list) else [anchors]
+        fields[name] = [anchor_from_spec(a) for a in seq]
+
+    return Template(
+        vendor=vendor,
+        match=match_patterns,
+        fields=fields,
+        category=str(spec.get("category") or "Utilities"),
+        subcategory=(spec.get("subcategory") or None),
+        source=source if source in ("user", "auto") else "user",
+    )
+
+
 @dataclass
 class FieldResult:
     value: object
