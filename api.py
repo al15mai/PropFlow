@@ -13,10 +13,19 @@ from datetime import datetime
 
 app = FastAPI()
 
-# Allow CORS from frontend dev servers
+# CORS: in production the frontend is served by THIS app (same origin — task D6),
+# so only the local dev servers need listing. (`allow_origins=["*"]` together with
+# credentials is rejected by browsers anyway.) `$PROPFLOW_CORS_ORIGINS` (comma-sep)
+# overrides, e.g. once there's a public HTTPS origin.
+_DEV_ORIGINS = [
+    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:5173", "http://127.0.0.1:5173",
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        o for o in os.environ.get("PROPFLOW_CORS_ORIGINS", ",".join(_DEV_ORIGINS)).split(",") if o
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -470,6 +479,21 @@ def delete_invoice_template(id: str):
     return
 
 
+# --- Static frontend bundle (task D6) ---------------------------------------
+# On the VPS the built `dist/` is served by this app (one origin, no Node
+# process). Mounted LAST so it never shadows an API route. In dev there's no
+# build dir, so this is a no-op and `npm run dev` serves the UI itself.
+_DIST_DIR = Path(
+    os.environ.get("PROPFLOW_DIST") or (Path(__file__).resolve().parent.parent / "dist")
+)
+if _DIST_DIR.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    # html=True → serves index.html at "/" (the app has no server-side routes,
+    # view state is client-side).
+    app.mount("/", StaticFiles(directory=str(_DIST_DIR), html=True), name="frontend")
+
+
 def main():
     import uvicorn
     import threading
@@ -477,7 +501,8 @@ def main():
     # Only enable reload when running in the main thread —
     # uvicorn's reloader uses signals which are not allowed in other threads.
     reload_flag = threading.current_thread() is threading.main_thread()
-    uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=reload_flag)
+    port = int(os.environ.get("PROPFLOW_API_PORT", "8000"))
+    uvicorn.run("api:app", host="0.0.0.0", port=port, reload=reload_flag)
 
 
 if __name__ == "__main__":
