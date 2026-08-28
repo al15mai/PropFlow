@@ -215,6 +215,26 @@ class ChatGPTClient(BrowserLLM):
             self.page.keyboard.press("Control+V")
         except Exception:
             box.press_sequentially(text, delay=random.randint(20, 60))
+
+        # A large clipboard paste lands in the ProseMirror editor asynchronously.
+        # If Send is clicked before it settles the turn goes out empty (or half),
+        # and the answer poll then just times out. Wait for the editor to hold
+        # most of the text (last resort: type it) before submitting.
+        want = max(1, int(len(text) * 0.6))
+        for _ in range(20):
+            self.page.wait_for_timeout(300)
+            try:
+                if len(box.inner_text()) >= want:
+                    break
+            except Exception:
+                break
+        else:
+            try:
+                box.fill("")
+                box.press_sequentially(text[:4000], delay=random.randint(8, 20))
+            except Exception:
+                pass
+
         self.page.wait_for_timeout(random.randint(400, 1100))
         btn = first_visible(self.page, SEND_BUTTON_SELECTORS)
         if btn is not None and btn.is_enabled():

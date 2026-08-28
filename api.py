@@ -775,12 +775,22 @@ def _ai_error(exc: Exception):
     return HTTPException(status_code=503, detail=f"ai_error: {exc}")
 
 
+# A full utility-invoice text layer runs 8–10 KB. Pasting all of it into a
+# browser LLM's composer is slow and tips ChatGPT's editor into a state where the
+# turn goes out empty and the answer poll times out. Every field we want (vendor,
+# current total, issue + due dates) sits in the first page — this cap keeps the
+# header and the totals box, drops the payment-history / legal-boilerplate tail.
+_INVOICE_TEXT_CAP = 2500
+
+
 def _model_extract_invoice(*, text: Optional[str] = None,
                            image_png: Optional[bytes] = None) -> dict:
     """Ask the browser LLM to read one invoice. Returns a partial
     ParsedInvoice-ish dict, or {} on any failure (caller keeps what it had)."""
     from llm import extract_json_object, providers
 
+    if text and len(text) > _INVOICE_TEXT_CAP:
+        text = text[:_INVOICE_TEXT_CAP]
     prompt = _INVOICE_PROMPT + (f"Invoice text:\n{text}" if text else "See the attached image.")
     try:
         answer = providers.run_text(lambda c: c.ask(prompt, image_png=image_png))
