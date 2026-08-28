@@ -4,7 +4,7 @@ import re
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, FileResponse
@@ -41,10 +41,18 @@ from models import (
     Document,
     InvoiceTemplate,
     InvoiceExtraction,
+    User,
+    Project,
+    Invite,
+    LoginRequest,
+    CreateInviteRequest,
+    AcceptInviteRequest,
+    AuthResponse,
 )
 
 from db import SQLiteDatabase
 from system_update import get_git_status
+import auth
 
 # Uploaded document files live OUTSIDE the repo tree (task E8b decision) so a
 # `git clean` / redeploy never wipes them and backups can cover them alongside
@@ -476,6 +484,112 @@ def update_invoice_template(id: str, patch: dict):
 @app.delete("/invoice-templates/{id}", status_code=204)
 def delete_invoice_template(id: str):
     db.delete_invoice_template(id)
+    return
+
+
+# --- Auth / multi-tenant (task D1) -----------------------------------------
+# Invite-only, minimal: email+password, bcrypt, HS256 JWT. No email sending —
+# the owner hands the invite link over out of band. Route guards / 401 handling
+# on the frontend land in D1b; until then these routes exist but nothing else
+# is gated (matches the pre-D1 behaviour + the D6 "VPN-only" posture).
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> User:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        claims = auth.decode_token(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = db.get_user(claims.get("sub", ""))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    return user
+
+
+def _auth_response(user: User) -> AuthResponse:
+    return AuthResponse(
+        token=auth.create_access_token(user.id, {"email": user.email}),
+        user=user,
+        projects=db.list_projects_for_user(user.id),
+    )
+
+
+@app.post("/auth/login", response_model=AuthResponse)
+def login(body: LoginRequest):
+    found = db.get_user_password_hash(body.email)
+    if not found or not auth.verify_password(body.password, found[1]):
+        raise HTTPException(status_code=401, detail="Wrong email or password")
+    user = db.get_user(found[0])
+    assert user is not None
+    return _auth_response(user)
+
+
+@app.get("/auth/me", response_model=AuthResponse)
+def whoami(user: User = Depends(get_current_user)):
+    # Re-issues a fresh token — cheap "refresh" for the minimal cut.
+    return _auth_response(user)
+
+
+@app.post("/auth/invite", response_model=Invite, status_code=201)
+def create_invite(body: CreateInviteRequest, user: User = Depends(get_current_user)):
+    if not db.is_project_member(body.projectId, user.id):
+        raise HTTPException(status_code=403, detail="Not a member of that project")
+    if db.get_user_by_email(body.email):
+        raise HTTPException(status_code=409, detail="That email already has an account")
+    raw = auth.new_invite_token()
+    invite = db.create_invite(
+        id=uuid.uuid4().hex, email=body.email, name=body.name, project_id=body.projectId,
+        role=body.role, token_hash=auth.hash_invite_token(raw), created_at=now_iso(),
+    )
+    # The raw token is returned ONCE, here, for the owner to build the invite link.
+    out = invite.model_dump()
+    out["token"] = raw
+    return JSONResponse(status_code=201, content=out)
+
+
+@app.get("/auth/invites", response_model=List[Invite])
+def list_invites(projectId: str, user: User = Depends(get_current_user)):
+    if not db.is_project_member(projectId, user.id):
+        raise HTTPException(status_code=403, detail="Not a member of that project")
+    return db.list_invites(projectId)
+
+
+@app.delete("/auth/invites/{id}", status_code=204)
+def revoke_invite(id: str, user: User = Depends(get_current_user)):
+    inv = db.get_invite(id)
+    if inv and db.is_project_member(inv.projectId, user.id):
+        db.delete_invite(id)
+    return
+
+
+@app.post("/auth/accept-invite", response_model=AuthResponse)
+def accept_invite(body: AcceptInviteRequest):
+    invite = db.get_invite_by_token_hash(auth.hash_invite_token(body.token))
+    if invite is None or invite.acceptedAt is not None:
+        raise HTTPException(status_code=404, detail="Invite not found or already used")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+    existing = db.get_user_by_email(invite.email)
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="That email already has an account")
+    user = db.create_user(
+        id=uuid.uuid4().hex, email=invite.email,
+        name=body.name or invite.name or invite.email.split("@")[0],
+        password_hash=auth.hash_password(body.password), avatar=None, created_at=now_iso(),
+    )
+    db.add_project_member(invite.projectId, user.id, invite.role)
+    db.mark_invite_accepted(invite.id, now_iso())
+    return _auth_response(user)
+
+
+@app.post("/auth/change-password", status_code=204)
+def change_password(body: LoginRequest, user: User = Depends(get_current_user)):
+    # `body.email` is ignored; the caller is identified by the token. Reuses
+    # LoginRequest so the client sends {email, password:<new>}.
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
+    db.set_user_password(user.id, auth.hash_password(body.password))
     return
 
 

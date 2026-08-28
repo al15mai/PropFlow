@@ -183,3 +183,74 @@ class InvoiceExtraction(BaseModel):
     templateVendor: Optional[str] = None
     dueDate: Optional[str] = None
     source: str = "template"  # "template" | "model" | "manual"
+
+
+# --- Auth / multi-tenant (task D1) ------------------------------------------
+
+Role = Literal["owner", "member"]
+
+
+class User(BaseModel):
+    """A person who can log in. The password hash NEVER appears here — it lives
+    only in the `users` table and is read by `db.get_user_auth()`."""
+    id: str
+    email: str
+    name: str
+    avatar: Optional[str] = None
+    createdAt: str
+
+    class Config:
+        extra = "ignore"
+
+
+class Project(BaseModel):
+    """A workspace. Existing NULL-`projectId` data is 'shared' and shows in every
+    project (D4b lenient filter); D1 seeds one project that owns it."""
+    id: str
+    name: str
+    ownerId: str
+    currency: str = "RON"
+    createdAt: str
+    members: List[str] = []  # user ids — populated on read from `project_members`
+
+    class Config:
+        extra = "ignore"
+
+
+class Invite(BaseModel):
+    """A pending membership. The raw token is shown to the owner exactly once
+    (embedded in the invite link) and stored only hashed."""
+    id: str
+    email: str
+    name: Optional[str] = None
+    projectId: str
+    role: Role = "member"
+    createdAt: str
+    acceptedAt: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class CreateInviteRequest(BaseModel):
+    email: str
+    name: Optional[str] = None
+    projectId: str
+    role: Role = "member"
+
+
+class AcceptInviteRequest(BaseModel):
+    token: str
+    name: Optional[str] = None
+    password: str
+
+
+class AuthResponse(BaseModel):
+    token: str
+    user: User
+    projects: List[Project] = []

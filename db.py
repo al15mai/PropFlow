@@ -16,6 +16,9 @@ from models import (
     LandlordSettings,
     Document,
     InvoiceTemplate,
+    User,
+    Project,
+    Invite,
 )
 
 
@@ -245,6 +248,43 @@ class SQLiteDatabase(DatabaseInterface):
                 source TEXT,
                 projectId TEXT,
                 createdAt TEXT
+            )""")
+        # Auth / multi-tenant (task D1). Migration 009 adds these to the live DB
+        # and seeds the landlord user + their project.
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                email TEXT UNIQUE,
+                name TEXT,
+                avatar TEXT,
+                passwordHash TEXT,
+                createdAt TEXT
+            )""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT,
+                ownerId TEXT,
+                currency TEXT,
+                createdAt TEXT
+            )""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS project_members (
+                projectId TEXT,
+                userId TEXT,
+                role TEXT,
+                PRIMARY KEY (projectId, userId)
+            )""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS invites (
+                id TEXT PRIMARY KEY,
+                email TEXT,
+                name TEXT,
+                projectId TEXT,
+                role TEXT,
+                tokenHash TEXT,
+                createdAt TEXT,
+                acceptedAt TEXT
             )""")
         assert self.conn is not None
         self.conn.commit()
@@ -777,3 +817,152 @@ class SQLiteDatabase(DatabaseInterface):
         assert self.conn is not None
         self.conn.commit()
         return got
+
+    # --- Users (task D1) ---
+
+    def create_user(
+        self, id: str, email: str, name: str, password_hash: str,
+        avatar: Optional[str], created_at: str,
+    ) -> User:
+        cur = self._cursor()
+        cur.execute(
+            "INSERT INTO users (id,email,name,avatar,passwordHash,createdAt) VALUES (?,?,?,?,?,?)",
+            (id, email.lower().strip(), name, avatar, password_hash, created_at),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+        got = self.get_user(id)
+        assert got is not None
+        return got
+
+    def get_user(self, id: str) -> Optional[User]:
+        row = self._cursor().execute("SELECT * FROM users WHERE id = ?", (id,)).fetchone()
+        return User(**self._row_to_dict(row)) if row else None
+
+    def get_user_by_email(self, email: str) -> Optional[User]:
+        row = self._cursor().execute(
+            "SELECT * FROM users WHERE email = ?", (email.lower().strip(),)
+        ).fetchone()
+        return User(**self._row_to_dict(row)) if row else None
+
+    def get_user_password_hash(self, email: str) -> Optional[tuple[str, str]]:
+        """(user_id, passwordHash) for a login check, or None. Kept off the `User`
+        model so a hash can never leak through a serialized response."""
+        row = self._cursor().execute(
+            "SELECT id, passwordHash FROM users WHERE email = ?", (email.lower().strip(),)
+        ).fetchone()
+        return (row["id"], row["passwordHash"]) if row else None
+
+    def set_user_password(self, user_id: str, password_hash: str) -> None:
+        cur = self._cursor()
+        cur.execute("UPDATE users SET passwordHash = ? WHERE id = ?", (password_hash, user_id))
+        assert self.conn is not None
+        self.conn.commit()
+
+    def count_users(self) -> int:
+        return self._cursor().execute("SELECT COUNT(*) FROM users").fetchone()[0]
+
+    # --- Projects (task D1) ---
+
+    def _project_with_members(self, row: sqlite3.Row) -> Project:
+        d = self._row_to_dict(row)
+        members = self._cursor().execute(
+            "SELECT userId FROM project_members WHERE projectId = ?", (d["id"],)
+        ).fetchall()
+        d["members"] = [m["userId"] for m in members]
+        return Project(**d)
+
+    def create_project(
+        self, id: str, name: str, owner_id: str, currency: str, created_at: str,
+    ) -> Project:
+        cur = self._cursor()
+        cur.execute(
+            "INSERT INTO projects (id,name,ownerId,currency,createdAt) VALUES (?,?,?,?,?)",
+            (id, name, owner_id, currency, created_at),
+        )
+        cur.execute(
+            "INSERT OR IGNORE INTO project_members (projectId,userId,role) VALUES (?,?,?)",
+            (id, owner_id, "owner"),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+        got = self.get_project(id)
+        assert got is not None
+        return got
+
+    def get_project(self, id: str) -> Optional[Project]:
+        row = self._cursor().execute("SELECT * FROM projects WHERE id = ?", (id,)).fetchone()
+        return self._project_with_members(row) if row else None
+
+    def list_projects_for_user(self, user_id: str) -> List[Project]:
+        rows = self._cursor().execute(
+            "SELECT p.* FROM projects p "
+            "JOIN project_members m ON m.projectId = p.id "
+            "WHERE m.userId = ? ORDER BY p.createdAt",
+            (user_id,),
+        ).fetchall()
+        return [self._project_with_members(r) for r in rows]
+
+    def is_project_member(self, project_id: str, user_id: str) -> bool:
+        return self._cursor().execute(
+            "SELECT 1 FROM project_members WHERE projectId = ? AND userId = ?",
+            (project_id, user_id),
+        ).fetchone() is not None
+
+    def add_project_member(self, project_id: str, user_id: str, role: str = "member") -> None:
+        cur = self._cursor()
+        cur.execute(
+            "INSERT OR REPLACE INTO project_members (projectId,userId,role) VALUES (?,?,?)",
+            (project_id, user_id, role),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+
+    def count_projects(self) -> int:
+        return self._cursor().execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+
+    # --- Invites (task D1) ---
+
+    def create_invite(
+        self, id: str, email: str, name: Optional[str], project_id: str,
+        role: str, token_hash: str, created_at: str,
+    ) -> Invite:
+        cur = self._cursor()
+        cur.execute(
+            "INSERT INTO invites (id,email,name,projectId,role,tokenHash,createdAt,acceptedAt) "
+            "VALUES (?,?,?,?,?,?,?,NULL)",
+            (id, email.lower().strip(), name, project_id, role, token_hash, created_at),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+        got = self.get_invite(id)
+        assert got is not None
+        return got
+
+    def get_invite(self, id: str) -> Optional[Invite]:
+        row = self._cursor().execute("SELECT * FROM invites WHERE id = ?", (id,)).fetchone()
+        return Invite(**self._row_to_dict(row)) if row else None
+
+    def get_invite_by_token_hash(self, token_hash: str) -> Optional[Invite]:
+        row = self._cursor().execute(
+            "SELECT * FROM invites WHERE tokenHash = ?", (token_hash,)
+        ).fetchone()
+        return Invite(**self._row_to_dict(row)) if row else None
+
+    def list_invites(self, project_id: str) -> List[Invite]:
+        rows = self._cursor().execute(
+            "SELECT * FROM invites WHERE projectId = ? ORDER BY createdAt DESC", (project_id,)
+        ).fetchall()
+        return [Invite(**self._row_to_dict(r)) for r in rows]
+
+    def mark_invite_accepted(self, invite_id: str, accepted_at: str) -> None:
+        cur = self._cursor()
+        cur.execute("UPDATE invites SET acceptedAt = ? WHERE id = ?", (accepted_at, invite_id))
+        assert self.conn is not None
+        self.conn.commit()
+
+    def delete_invite(self, id: str) -> None:
+        cur = self._cursor()
+        cur.execute("DELETE FROM invites WHERE id = ?", (id,))
+        assert self.conn is not None
+        self.conn.commit()
