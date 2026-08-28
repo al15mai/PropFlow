@@ -326,6 +326,10 @@ class SQLiteDatabase(DatabaseInterface):
         rows = cur.execute(q, params).fetchall()
         return [Property(**self._row_to_dict(r)) for r in rows]
 
+    def get_property(self, id: str) -> Optional[Property]:
+        row = self._cursor().execute("SELECT * FROM properties WHERE id = ?", (id,)).fetchone()
+        return Property(**self._row_to_dict(row)) if row else None
+
     def create_property(self, p: Property) -> Property:
         cur = self._cursor()
         cur.execute(
@@ -403,6 +407,10 @@ class SQLiteDatabase(DatabaseInterface):
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
         return [Tenant(**self._row_to_dict(r)) for r in rows]
+
+    def get_tenant(self, id: str) -> Optional[Tenant]:
+        row = self._cursor().execute("SELECT * FROM tenants WHERE id = ?", (id,)).fetchone()
+        return Tenant(**self._row_to_dict(row)) if row else None
 
     def create_tenant(self, t: Tenant) -> Tenant:
         cur = self._cursor()
@@ -501,6 +509,10 @@ class SQLiteDatabase(DatabaseInterface):
         base = tx.amountBase if tx.amountBase is not None else round((tx.amount or 0) * fx, 2)
         return tx.currency, fx, base
 
+    def get_transaction(self, id: str) -> Optional[Transaction]:
+        row = self._cursor().execute("SELECT * FROM transactions WHERE id = ?", (id,)).fetchone()
+        return Transaction(**self._row_to_dict(row)) if row else None
+
     def create_transaction(self, tx: Transaction) -> Transaction:
         cur = self._cursor()
         tx.propertyId = self._resolve_property_id(tx)
@@ -589,6 +601,10 @@ class SQLiteDatabase(DatabaseInterface):
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
         return [MaintenanceRequest(**self._row_to_dict(r)) for r in rows]
+
+    def get_maintenance(self, id: str) -> Optional[MaintenanceRequest]:
+        row = self._cursor().execute("SELECT * FROM maintenance WHERE id = ?", (id,)).fetchone()
+        return MaintenanceRequest(**self._row_to_dict(row)) if row else None
 
     def create_maintenance(self, req: MaintenanceRequest) -> MaintenanceRequest:
         cur = self._cursor()
@@ -906,6 +922,14 @@ class SQLiteDatabase(DatabaseInterface):
         return self._cursor().execute(
             "SELECT 1 FROM project_members WHERE projectId = ? AND userId = ?",
             (project_id, user_id),
+        ).fetchone() is not None
+
+    def user_owns_any_project(self, user_id: str) -> bool:
+        """True if this user is the 'owner' of at least one project — the proxy
+        for 'is the landlord' used by owner-gated routes (task D1c)."""
+        return self._cursor().execute(
+            "SELECT 1 FROM project_members WHERE userId = ? AND role = 'owner' LIMIT 1",
+            (user_id,),
         ).fetchone() is not None
 
     def add_project_member(self, project_id: str, user_id: str, role: str = "member") -> None:

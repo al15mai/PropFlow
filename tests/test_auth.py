@@ -102,6 +102,7 @@ def test_login_wrong_password(client, owner):
 
 
 def test_me_requires_token(client, owner):
+    client.set_token(None)
     assert client.get("/auth/me").status_code == 401
     assert client.get("/auth/me", headers={"Authorization": "Bearer garbage"}).status_code == 401
 

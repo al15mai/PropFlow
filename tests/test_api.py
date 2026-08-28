@@ -81,7 +81,7 @@ def test_unknown_fields_are_ignored(client, make_tx):
     # models.Transaction has `extra = "ignore"`
     payload = make_tx(id="x1")
     payload["someClientOnlyField"] = "whatever"
-    payload["projectId"] = "proj-1"
+    payload["projectId"] = client.owner_project_id
     r = client.post("/transactions", json=payload)
     assert r.status_code == 200
 

@@ -14,10 +14,19 @@ import httpx
 
 
 class ASGIClient:
-    def __init__(self, app):
+    def __init__(self, app, headers=None):
         self._loop = asyncio.new_event_loop()
         transport = httpx.ASGITransport(app=app)
-        self._client = httpx.AsyncClient(transport=transport, base_url="http://test")
+        self._client = httpx.AsyncClient(
+            transport=transport, base_url="http://test", headers=headers or {}
+        )
+
+    def set_token(self, token):
+        """Swap the default bearer token (or clear it with None)."""
+        if token:
+            self._client.headers["Authorization"] = f"Bearer {token}"
+        else:
+            self._client.headers.pop("Authorization", None)
 
     def request(self, method: str, url: str, **kw) -> httpx.Response:
         return self._loop.run_until_complete(self._client.request(method, url, **kw))

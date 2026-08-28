@@ -56,16 +56,58 @@ def database(db_path):
 
 @pytest.fixture
 def client(db_path, monkeypatch):
-    """HTTP client wired to the real FastAPI app + a fresh per-test DB."""
+    """HTTP client wired to the real FastAPI app + a fresh per-test DB.
+
+    Since D1c every data route requires a token, so this seeds an owner + one
+    project ("proj-test") and sends that owner's bearer token by default — the
+    owner sees everything, incl. legacy NULL-`projectId` rows, so pre-D1c tests
+    keep working unchanged. `c.set_token(None)` for an anonymous request;
+    `c.seed_user(email)` (attached below) for a second, separate account.
+    """
+    import uuid
     import db as db_mod
     import api as api_mod
+    import auth as auth_mod
 
     from _asgi import ASGIClient
 
     fresh = db_mod.SQLiteDatabase(str(db_path))
     fresh.initialize()
     monkeypatch.setattr(api_mod, "db", fresh)
-    c = ASGIClient(api_mod.app)
+
+    owner = fresh.create_user(
+        id=uuid.uuid4().hex, email="owner@test.local", name="Owner",
+        password_hash=auth_mod.hash_password("ownerpass1"), avatar=None,
+        created_at="2026-08-29T00:00:00",
+    )
+    fresh.create_project(
+        id="proj-test", name="Test", owner_id=owner.id, currency="RON",
+        created_at="2026-08-29T00:00:00",
+    )
+    token = auth_mod.create_access_token(owner.id, {"email": owner.email})
+    c = ASGIClient(api_mod.app, headers={"Authorization": f"Bearer {token}"})
+    c.owner = owner
+    c.owner_token = token
+    c.owner_project_id = "proj-test"
+
+    def seed_user(email, project_name=None, role="owner"):
+        """Create another user (+ their own project by default) and return
+        (user, project_id, token)."""
+        u = fresh.create_user(
+            id=uuid.uuid4().hex, email=email, name=email.split("@")[0],
+            password_hash=auth_mod.hash_password("otherpass1"), avatar=None,
+            created_at="2026-08-29T00:00:00",
+        )
+        pid = None
+        if project_name is not None:
+            pid = uuid.uuid4().hex
+            fresh.create_project(
+                id=pid, name=project_name, owner_id=u.id, currency="RON",
+                created_at="2026-08-29T00:00:00",
+            )
+        return u, pid, auth_mod.create_access_token(u.id, {"email": u.email})
+
+    c.seed_user = seed_user
     yield c
     c.close()
     if fresh.conn is not None:

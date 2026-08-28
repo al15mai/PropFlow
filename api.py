@@ -82,6 +82,58 @@ def now_iso():
     return datetime.utcnow().isoformat()
 
 
+# --- Auth guards (task D1c) ----------------------------------------------------
+# Defined before the data routes so `Depends(get_current_user)` resolves. The
+# `/auth/*` handlers themselves live further down (after the token helpers).
+
+def get_current_user(authorization: Optional[str] = Header(default=None)) -> User:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        claims = auth.decode_token(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    user = db.get_user(claims.get("sub", ""))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    return user
+
+
+def require_owner(user: User = Depends(get_current_user)) -> User:
+    """The landlord — owner of at least one project. Gates destructive / global
+    operations (D5b restart/update, and anything project-admin)."""
+    if not db.user_owns_any_project(user.id):
+        raise HTTPException(status_code=403, detail="Owner only")
+    return user
+
+
+def _visible_project_ids(user: User) -> list:
+    return [p.id for p in db.list_projects_for_user(user.id)]
+
+
+def _resolve_project(projectId: Optional[str], user: User) -> str:
+    """Which project this request reads/writes. A `projectId` the caller isn't a
+    member of -> 403. None -> the caller's (only) project. NULL-`projectId` rows
+    stay visible to whichever project is resolved (db.py `_project_filter` is
+    lenient, task D4b)."""
+    mine = _visible_project_ids(user)
+    if not mine:
+        raise HTTPException(status_code=403, detail="No project — ask an owner for an invite")
+    if projectId is None:
+        return mine[0]
+    if projectId not in mine:
+        raise HTTPException(status_code=403, detail="Not a member of that project")
+    return projectId
+
+
+def _assert_owns_row(row_project_id: Optional[str], user: User, what: str) -> None:
+    """A write/delete targeting a row: allowed if the row is shared (NULL project,
+    legacy) or belongs to one of the caller's projects."""
+    if row_project_id is not None and row_project_id not in _visible_project_ids(user):
+        raise HTTPException(status_code=403, detail=f"{what} belongs to another workspace")
+
+
 # Health endpoint
 @app.get("/health")
 def health():
@@ -100,28 +152,35 @@ def list_properties(
     type: Optional[str] = None,
     status: Optional[str] = None,
     projectId: Optional[str] = None,
+    user: User = Depends(get_current_user),
 ):
-    return db.list_properties(type=type, status=status, projectId=projectId)
+    return db.list_properties(type=type, status=status, projectId=_resolve_project(projectId, user))
 
 
 @app.post("/properties", response_model=Property)
-def create_property(p: Property):
+def create_property(p: Property, user: User = Depends(get_current_user)):
+    p.projectId = _resolve_project(p.projectId, user)
     db.create_property(p)
     return p
 
 
 @app.put("/properties/{id}", response_model=Property)
-def update_property(id: str, p: Property):
-    try:
-        db.update_property(id, p)
-        return p
-    except KeyError:
+def update_property(id: str, p: Property, user: User = Depends(get_current_user)):
+    existing = db.get_property(id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Property not found")
+    _assert_owns_row(existing.projectId, user, "Property")
+    _assert_owns_row(p.projectId, user, "Property")
+    db.update_property(id, p)
+    return p
 
 
 @app.delete("/properties/{id}", status_code=204)
-def delete_property(id: str):
-    db.delete_property(id)
+def delete_property(id: str, user: User = Depends(get_current_user)):
+    existing = db.get_property(id)
+    if existing is not None:
+        _assert_owns_row(existing.projectId, user, "Property")
+        db.delete_property(id)
     return
 
 
@@ -131,28 +190,37 @@ def list_tenants(
     propertyId: Optional[str] = None,
     status: Optional[str] = None,
     projectId: Optional[str] = None,
+    user: User = Depends(get_current_user),
 ):
-    return db.list_tenants(propertyId=propertyId, status=status, projectId=projectId)
+    return db.list_tenants(
+        propertyId=propertyId, status=status, projectId=_resolve_project(projectId, user)
+    )
 
 
 @app.post("/tenants", response_model=Tenant)
-def create_tenant(t: Tenant):
+def create_tenant(t: Tenant, user: User = Depends(get_current_user)):
+    t.projectId = _resolve_project(t.projectId, user)
     db.create_tenant(t)
     return t
 
 
 @app.put("/tenants/{id}", response_model=Tenant)
-def update_tenant(id: str, t: Tenant):
-    try:
-        db.update_tenant(id, t)
-        return t
-    except KeyError:
+def update_tenant(id: str, t: Tenant, user: User = Depends(get_current_user)):
+    existing = db.get_tenant(id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    _assert_owns_row(existing.projectId, user, "Tenant")
+    _assert_owns_row(t.projectId, user, "Tenant")
+    db.update_tenant(id, t)
+    return t
 
 
 @app.delete("/tenants/{id}", status_code=204)
-def delete_tenant(id: str):
-    db.delete_tenant(id)
+def delete_tenant(id: str, user: User = Depends(get_current_user)):
+    existing = db.get_tenant(id)
+    if existing is not None:
+        _assert_owns_row(existing.projectId, user, "Tenant")
+        db.delete_tenant(id)
     return
 
 
@@ -166,6 +234,7 @@ def list_transactions(
     tenantId: Optional[str] = None,
     maintenanceId: Optional[str] = None,
     projectId: Optional[str] = None,
+    user: User = Depends(get_current_user),
 ):
     return db.list_transactions(
         startDate=startDate,
@@ -174,12 +243,13 @@ def list_transactions(
         propertyId=propertyId,
         tenantId=tenantId,
         maintenanceId=maintenanceId,
-        projectId=projectId,
+        projectId=_resolve_project(projectId, user),
     )
 
 
 @app.post("/transactions", response_model=Transaction)
-def create_transaction(tx: Transaction):
+def create_transaction(tx: Transaction, user: User = Depends(get_current_user)):
+    tx.projectId = _resolve_project(tx.projectId, user)
     db.create_transaction(tx)
     return tx
 
@@ -199,17 +269,22 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 @app.put("/transactions/{id}", response_model=Transaction)
-def update_transaction(id: str, tx: Transaction):
-    try:
-        db.update_transaction(id, tx)
-        return tx
-    except KeyError:
+def update_transaction(id: str, tx: Transaction, user: User = Depends(get_current_user)):
+    existing = db.get_transaction(id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Transaction not found")
+    _assert_owns_row(existing.projectId, user, "Transaction")
+    _assert_owns_row(tx.projectId, user, "Transaction")
+    db.update_transaction(id, tx)
+    return tx
 
 
 @app.delete("/transactions/{id}", status_code=204)
-def delete_transaction(id: str):
-    db.delete_transaction(id)
+def delete_transaction(id: str, user: User = Depends(get_current_user)):
+    existing = db.get_transaction(id)
+    if existing is not None:
+        _assert_owns_row(existing.projectId, user, "Transaction")
+        db.delete_transaction(id)
     return
 
 
@@ -220,42 +295,50 @@ def list_maintenance(
     propertyId: Optional[str] = None,
     tenantId: Optional[str] = None,
     projectId: Optional[str] = None,
+    user: User = Depends(get_current_user),
 ):
     return db.list_maintenance(
-        status=status, propertyId=propertyId, tenantId=tenantId, projectId=projectId
+        status=status, propertyId=propertyId, tenantId=tenantId,
+        projectId=_resolve_project(projectId, user),
     )
 
 
 @app.post("/maintenance", response_model=MaintenanceRequest)
-def create_maintenance(req: MaintenanceRequest):
+def create_maintenance(req: MaintenanceRequest, user: User = Depends(get_current_user)):
+    req.projectId = _resolve_project(req.projectId, user)
     db.create_maintenance(req)
     return req
 
 
 @app.put("/maintenance/{id}", response_model=MaintenanceRequest)
-def update_maintenance(id: str, req: MaintenanceRequest):
-    try:
-        db.update_maintenance(id, req)
-        return req
-    except KeyError:
+def update_maintenance(id: str, req: MaintenanceRequest, user: User = Depends(get_current_user)):
+    existing = db.get_maintenance(id)
+    if existing is None:
         raise HTTPException(status_code=404, detail="Maintenance request not found")
+    _assert_owns_row(existing.projectId, user, "Maintenance request")
+    _assert_owns_row(req.projectId, user, "Maintenance request")
+    db.update_maintenance(id, req)
+    return req
 
 
 @app.delete("/maintenance/{id}", status_code=204)
-def delete_maintenance(id: str):
-    db.delete_maintenance(id)
+def delete_maintenance(id: str, user: User = Depends(get_current_user)):
+    existing = db.get_maintenance(id)
+    if existing is not None:
+        _assert_owns_row(existing.projectId, user, "Maintenance request")
+        db.delete_maintenance(id)
     return
 
 
 # --- Alerts ---
 @app.get("/alerts", response_model=List[Alert])
-def list_alerts():
+def list_alerts(user: User = Depends(get_current_user)):
     return db.list_alerts()
 
 
 # --- Settings ---
 @app.post("/settings", response_model=LandlordSettings)
-def save_settings(s: LandlordSettings):
+def save_settings(s: LandlordSettings, user: User = Depends(require_owner)):
     db.save_settings(s)
     return s
 
@@ -277,12 +360,26 @@ def _doc_response(doc: Document) -> dict:
     return out
 
 
+def _assert_tx_in_scope(transaction_id: Optional[str], user: User) -> None:
+    """A document hangs off a transaction — it's in scope only if that
+    transaction is (E8b tenant-scoping decision; enforced server-side in D1c).
+    A `pending` (transaction-less) doc is allowed for any authed user."""
+    if not transaction_id:
+        return
+    tx = db.get_transaction(transaction_id)
+    if tx is not None:
+        _assert_owns_row(tx.projectId, user, "That transaction")
+
+
 @app.get("/documents")
 def list_documents(
     transactionId: Optional[str] = None,
     tenantId: Optional[str] = None,
     pending: Optional[bool] = None,
+    user: User = Depends(get_current_user),
 ):
+    if transactionId:
+        _assert_tx_in_scope(transactionId, user)
     return [_doc_response(d) for d in db.list_documents(transactionId, tenantId, pending)]
 
 
@@ -294,7 +391,9 @@ async def create_document(
     kind: str = Form("other"),
     note: str = Form(""),
     filename: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
 ):
+    _assert_tx_in_scope(transactionId or None, user)
     if kind not in ("invoice", "receipt", "bill", "other"):
         kind = "other"
     doc_id = uuid.uuid4().hex
@@ -327,10 +426,11 @@ async def create_document(
 
 
 @app.get("/documents/{id}/file")
-def get_document_file(id: str):
+def get_document_file(id: str, user: User = Depends(get_current_user)):
     doc = db.get_document(id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    _assert_tx_in_scope(doc.transactionId, user)
     if doc.storage != "file" or not doc.path:
         raise HTTPException(status_code=409, detail="This document is a link, not a stored file")
     fp = _uploads_dir() / doc.path
@@ -340,7 +440,13 @@ def get_document_file(id: str):
 
 
 @app.put("/documents/{id}", response_model=Document)
-def update_document(id: str, patch: dict):
+def update_document(id: str, patch: dict, user: User = Depends(get_current_user)):
+    existing = db.get_document(id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    _assert_tx_in_scope(existing.transactionId, user)
+    if patch.get("transactionId"):
+        _assert_tx_in_scope(patch["transactionId"], user)
     try:
         return db.update_document(id, **patch)
     except KeyError:
@@ -348,7 +454,10 @@ def update_document(id: str, patch: dict):
 
 
 @app.delete("/documents/{id}", status_code=204)
-def delete_document(id: str):
+def delete_document(id: str, user: User = Depends(get_current_user)):
+    existing = db.get_document(id)
+    if existing is not None:
+        _assert_tx_in_scope(existing.transactionId, user)
     doc = db.delete_document(id)
     if doc and doc.storage == "file" and doc.path:
         (_uploads_dir() / doc.path).unlink(missing_ok=True)
@@ -439,7 +548,9 @@ async def extract_invoice(
     names: Optional[str] = Form(None),   # tenant/owner names to scrub, comma-sep
     places: Optional[str] = Form(None),  # property city/county to scrub, comma-sep
     projectId: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
 ):
+    projectId = _resolve_project(projectId, user)
     from invoice import extract, pdf_to_text, redact
     from llm import feature_mode
 
@@ -467,12 +578,12 @@ async def extract_invoice(
 
 
 @app.get("/invoice-templates", response_model=List[InvoiceTemplate])
-def list_invoice_templates(projectId: Optional[str] = None):
-    return db.list_invoice_templates(projectId)
+def list_invoice_templates(projectId: Optional[str] = None, user: User = Depends(get_current_user)):
+    return db.list_invoice_templates(_resolve_project(projectId, user))
 
 
 @app.post("/invoice-templates", response_model=InvoiceTemplate, status_code=201)
-def create_invoice_template(t: InvoiceTemplate):
+def create_invoice_template(t: InvoiceTemplate, user: User = Depends(get_current_user)):
     from invoice.templates import TemplateSpecError, template_from_spec
 
     try:
@@ -483,13 +594,18 @@ def create_invoice_template(t: InvoiceTemplate):
         t.id = uuid.uuid4().hex
     if not t.createdAt:
         t.createdAt = now_iso()
+    t.projectId = _resolve_project(t.projectId, user)
     return db.create_invoice_template(t)
 
 
 @app.put("/invoice-templates/{id}", response_model=InvoiceTemplate)
-def update_invoice_template(id: str, patch: dict):
+def update_invoice_template(id: str, patch: dict, user: User = Depends(get_current_user)):
     from invoice.templates import TemplateSpecError, template_from_spec
 
+    existing = db.get_invoice_template(id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Invoice template not found")
+    _assert_owns_row(existing.projectId, user, "Invoice template")
     if "spec" in patch:
         try:
             template_from_spec(patch["spec"], source=patch.get("source", "user"))
@@ -502,30 +618,20 @@ def update_invoice_template(id: str, patch: dict):
 
 
 @app.delete("/invoice-templates/{id}", status_code=204)
-def delete_invoice_template(id: str):
-    db.delete_invoice_template(id)
+def delete_invoice_template(id: str, user: User = Depends(get_current_user)):
+    existing = db.get_invoice_template(id)
+    if existing is not None:
+        _assert_owns_row(existing.projectId, user, "Invoice template")
+        db.delete_invoice_template(id)
     return
 
 
 # --- Auth / multi-tenant (task D1) -----------------------------------------
 # Invite-only, minimal: email+password, bcrypt, HS256 JWT. No email sending —
-# the owner hands the invite link over out of band. Route guards / 401 handling
-# on the frontend land in D1b; until then these routes exist but nothing else
-# is gated (matches the pre-D1 behaviour + the D6 "VPN-only" posture).
-
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> User:
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        claims = auth.decode_token(token)
-    except Exception:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    user = db.get_user(claims.get("sub", ""))
-    if user is None:
-        raise HTTPException(status_code=401, detail="Unknown user")
-    return user
-
+# the owner hands the invite link over out of band. The token helpers +
+# `get_current_user` / `require_owner` guards live near the top of this file
+# (before the data routes); D1c applies them to every data route so a token is
+# required and each caller sees only their project(s).
 
 def _auth_response(user: User) -> AuthResponse:
     return AuthResponse(
@@ -670,14 +776,14 @@ def _model_extract_invoice(*, text: Optional[str] = None,
 
 
 @app.get("/ai/status")
-def ai_status():
+def ai_status(user: User = Depends(get_current_user)):
     from llm import providers
 
     return providers.status()
 
 
 @app.post("/ai/login")
-def ai_login(provider: str = Form(...)):
+def ai_login(provider: str = Form(...), user: User = Depends(require_owner)):
     from llm import providers
 
     try:
@@ -687,7 +793,7 @@ def ai_login(provider: str = Form(...)):
 
 
 @app.post("/ai/message")
-def ai_message(body: dict):
+def ai_message(body: dict, user: User = Depends(get_current_user)):
     """Browser fallback for `generateTenantCommunication` (E6). The frontend
     composes the prompt and posts `{prompt}`; we return `{text}`."""
     prompt = (body or {}).get("prompt", "").strip()
@@ -707,6 +813,7 @@ async def ai_extract_invoice(
     documentId: Optional[str] = Form(None),
     names: Optional[str] = Form(None),
     places: Optional[str] = Form(None),
+    user: User = Depends(get_current_user),
 ):
     """Force the model path for one invoice (image, scanned PDF, or a vendor no
     template knows). PII is redacted before anything is sent."""
