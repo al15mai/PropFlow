@@ -51,7 +51,7 @@ from models import (
 )
 
 from db import SQLiteDatabase
-from system_update import get_git_status
+from system_update import get_git_status, run_update, schedule_self_restart
 import auth
 
 # Uploaded document files live OUTSIDE the repo tree (task E8b decision) so a
@@ -144,6 +144,31 @@ def health():
 @app.get("/admin/version")
 def admin_version():
     return get_git_status()
+
+
+# --- Owner-only restart / update & restart (task D5b) ----------------------
+# The process exits ~1.5s after responding; systemd `Restart=always` (D6) brings
+# it back on the (possibly just-pulled) code. `require_owner` -> 403 "Owner only"
+# for a non-owner, 401 if unauthenticated.
+
+@app.post("/admin/restart")
+def admin_restart(user: User = Depends(require_owner)):
+    """Reload the API process without touching git — for an env/config change or
+    a stuck process."""
+    schedule_self_restart()
+    return {"status": "restarting"}
+
+
+@app.post("/admin/update")
+def admin_update(user: User = Depends(require_owner)):
+    """Fast-forward both repos to their tracked branches, run installs if a
+    lockfile moved, then restart if anything changed. 409 (never restarting,
+    nothing changed) if the backend tree is dirty or the pull isn't a
+    fast-forward."""
+    result = run_update()
+    if result.get("status") == "error":
+        raise HTTPException(status_code=409, detail=result.get("backend"))
+    return result
 
 
 # --- Properties ---
