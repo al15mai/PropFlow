@@ -168,7 +168,8 @@ class SQLiteDatabase(DatabaseInterface):
                 isPaid INTEGER,
                 currency TEXT,
                 fxRate REAL,
-                amountBase REAL
+                amountBase REAL,
+                maintenanceId TEXT
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS maintenance (
@@ -347,7 +348,7 @@ class SQLiteDatabase(DatabaseInterface):
         q = "SELECT * FROM transactions"
         clauses = []
         params: List[Any] = []
-        for key in ("startDate", "endDate", "type", "propertyId", "tenantId"):
+        for key in ("startDate", "endDate", "type", "propertyId", "tenantId", "maintenanceId"):
             if key in filters and filters[key] is not None:
                 if key == "startDate":
                     clauses.append("date >= ?")
@@ -388,7 +389,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid,currency,fxRate,amountBase) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid,currency,fxRate,amountBase,maintenanceId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tx.id,
                 tx.date,
@@ -406,6 +407,7 @@ class SQLiteDatabase(DatabaseInterface):
                 currency,
                 fx_rate,
                 amount_base,
+                tx.maintenanceId,
             ),
         )
         assert self.conn is not None
@@ -418,7 +420,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=?,currency=?,fxRate=?,amountBase=? WHERE id=?",
+            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=?,currency=?,fxRate=?,amountBase=?,maintenanceId=? WHERE id=?",
             (
                 tx.date,
                 tx.amount,
@@ -435,6 +437,7 @@ class SQLiteDatabase(DatabaseInterface):
                 currency,
                 fx_rate,
                 amount_base,
+                tx.maintenanceId,
                 id,
             ),
         )

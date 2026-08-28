@@ -120,6 +120,7 @@ def list_transactions(
     type: Optional[str] = None,
     propertyId: Optional[str] = None,
     tenantId: Optional[str] = None,
+    maintenanceId: Optional[str] = None,
 ):
     return db.list_transactions(
         startDate=startDate,
@@ -127,6 +128,7 @@ def list_transactions(
         type=type,
         propertyId=propertyId,
         tenantId=tenantId,
+        maintenanceId=maintenanceId,
     )
 
 

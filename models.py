@@ -68,6 +68,9 @@ class Transaction(BaseModel):
     currency: Optional[str] = None          # currency `amount` is denominated in
     fxRate: Optional[float] = None          # RON (base) per 1 unit of `currency`
     amountBase: Optional[float] = None      # amount * fxRate, i.e. the value in RON
+    # Links an expense to the maintenance request it paid for (task E3). Null for
+    # everything that isn't a repair cost.
+    maintenanceId: Optional[str] = None
 
     class Config:
         extra = "ignore"
