@@ -3,12 +3,21 @@
 Same shape as ``gemini_client.GeminiClient`` — persistent profile, ordered
 selectors, clipboard send, JS last-response snapshot + stability polling.
 
-⚠️ **The selectors below are ported from SongFlow's ``chatgpt_client.py`` and
-have NOT been re-verified against a live DOM for PropFlow.** SongFlow's own
-docstring carries the same caveat. Treat Gemini as the primary provider;
-budget a live-DOM debugging pass before relying on this one. Never use
-`Download.save_as()` (it wedged SongFlow's worker twice) — not that this
-client downloads anything.
+Live-DOM pass done 2026-08-29 against chatgpt.com:
+
+- The composer is ``#prompt-textarea`` (a ``div.ProseMirror``, contenteditable);
+  the Send button only exists *after* text is typed, so login detection keys on
+  the composer alone, never the button.
+- **Cloudflare Turnstile** ("verify you are human") fingerprints Playwright's
+  bundled Chromium and loops forever, even headful + logged in. Fixed by
+  ``base.launch_stealth_context`` — system Chrome (``channel="chrome"``) plus a
+  ``navigator.webdriver`` spoof, which cleared it every time in testing. If a
+  future Cloudflare update re-blocks, ``ensure_logged_in`` says so explicitly
+  and the fix is a manual checkbox solve or ``AI_TEXT_PROVIDER=gemini``.
+
+Gemini stays the primary provider (no Cloudflare, no Chrome dependency); ChatGPT
+is the rate-limit backup. Never use ``Download.save_as()`` (it wedged SongFlow's
+worker twice) — not that this client downloads anything.
 """
 from __future__ import annotations
 
@@ -16,6 +25,7 @@ import random
 import time
 
 from .base import (
+    STEALTH_INIT_JS,
     BrowserLLM,
     LLMError,
     LLMNotLoggedIn,
@@ -23,7 +33,9 @@ from .base import (
     LLMUnavailable,
     first_visible,
     human_delay,
+    launch_stealth_context,
     looks_like_closed_browser,
+    looks_like_cloudflare_challenge,
     profiles_dir,
 )
 
@@ -94,15 +106,17 @@ class ChatGPTClient(BrowserLLM):
         if self._pw is None:
             self._pw = sync_playwright().start()
         try:
-            self._browser = self._pw.chromium.launch_persistent_context(
-                user_data_dir=self._profile,
+            # system Chrome + navigator.webdriver spoof — clears Cloudflare
+            # Turnstile on chatgpt.com (bundled Chromium never gets past it).
+            self._browser = launch_stealth_context(
+                self._pw,
+                profile=self._profile,
                 headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"],
-                viewport={"width": 1280, "height": 900},
                 permissions=["clipboard-read", "clipboard-write"],
             )
+            self._browser.add_init_script(STEALTH_INIT_JS)
         except Exception as e:
-            raise LLMUnavailable(f"could not launch Chromium: {e}") from e
+            raise LLMUnavailable(f"could not launch Chrome: {e}") from e
 
     def _open_page(self) -> None:
         self.page = self._browser.new_page()
@@ -127,6 +141,8 @@ class ChatGPTClient(BrowserLLM):
                 return False
             if "chatgpt.com" not in url and "chat.openai.com" not in url:
                 return False
+            if looks_like_cloudflare_challenge(self.page):
+                return False
             return first_visible(self.page, PROMPT_INPUT_SELECTORS) is not None
         except Exception:
             return False
@@ -134,10 +150,20 @@ class ChatGPTClient(BrowserLLM):
     def ensure_logged_in(self, timeout_s: int = 300) -> bool:
         self._ensure_browser()
         deadline = time.time() + timeout_s
+        cf_seen = False
         while time.time() < deadline:
             if self._logged_in():
                 return True
+            if looks_like_cloudflare_challenge(self.page):
+                cf_seen = True
             time.sleep(2)
+        if cf_seen:
+            raise LLMNotLoggedIn(
+                "ChatGPT is stuck on Cloudflare's 'verify you are human' check — "
+                "the stealth launch (system Chrome + webdriver spoof) didn't clear "
+                "it. Solve the checkbox once in the visible window, or fall back to "
+                "the Gemini provider (AI_TEXT_PROVIDER=gemini)."
+            )
         raise LLMNotLoggedIn(
             "ChatGPT composer never appeared — sign in once via "
             "scripts/propflow_login_vnc.sh chatgpt."

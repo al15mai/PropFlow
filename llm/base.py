@@ -43,6 +43,58 @@ def profiles_dir() -> Path:
     return d
 
 
+# --- anti-bot launch -------------------------------------------------------
+# chatgpt.com sits behind Cloudflare Turnstile, which fingerprints Playwright's
+# bundled Chromium and shows an endless "verify you are human" interstitial even
+# headful + logged in. Two levers clear it (verified 2026-08-29): launch the
+# system Chrome build (`channel="chrome"`) instead of bundled Chromium, and null
+# out `navigator.webdriver` + the other obvious automation tells before any page
+# script runs. gemini.google.com doesn't need this but it's harmless there.
+
+CHROME_UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
+
+STEALTH_INIT_JS = r"""
+Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+window.chrome = window.chrome || { runtime: {} };
+"""
+
+# Cloudflare's interstitial keeps the target URL but swaps in this <title>.
+_CF_TITLES = ("just a moment...", "just a moment", "attention required!")
+
+
+def looks_like_cloudflare_challenge(page) -> bool:
+    try:
+        return (page.title() or "").strip().lower() in _CF_TITLES
+    except Exception:
+        return False
+
+
+def launch_stealth_context(pw, *, profile: str, headless: bool, **extra):
+    """`launch_persistent_context` with the anti-bot tweaks applied. Prefers the
+    system Chrome channel; falls back to bundled Chromium if it isn't installed.
+    Caller still adds `ctx.add_init_script(STEALTH_INIT_JS)` — do it right after
+    this returns, before opening the first page."""
+    kw = dict(
+        user_data_dir=profile,
+        headless=headless,
+        args=["--disable-blink-features=AutomationControlled"],
+        viewport={"width": 1360, "height": 940},
+        user_agent=CHROME_UA,
+    )
+    kw.update(extra)
+    try:
+        return pw.chromium.launch_persistent_context(channel="chrome", **kw)
+    except Exception:
+        # no system Chrome (CI, a fresh VPS before `apt install`) — bundled
+        # Chromium still works for Gemini; ChatGPT may hit Cloudflare.
+        return pw.chromium.launch_persistent_context(**kw)
+
+
 def env_float(name: str, default: float) -> float:
     try:
         return float(os.environ.get(name, default))
