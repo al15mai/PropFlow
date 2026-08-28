@@ -57,7 +57,7 @@ class _FakeClient:
         return f"echo: {prompt}"
 
     def close(self):
-        pass
+        self.calls.append("__closed__")
 
 
 def test_run_text_passes_the_client_and_returns_result(monkeypatch):
@@ -88,3 +88,16 @@ def test_run_text_propagates_client_errors(monkeypatch):
     monkeypatch.setattr(providers, "_client_for", lambda p: _Broken())
     with pytest.raises(LLMNotLoggedIn):
         providers.run_text(lambda c: c.ask("x"))
+
+
+def test_shutdown_closes_each_client_on_its_worker(monkeypatch):
+    fake = _FakeClient()
+    # cache it the way the real _client_for would, and give it a worker
+    providers._clients["gemini"] = fake
+    providers._worker_for("gemini")
+    assert "__closed__" not in fake.calls
+
+    providers.shutdown()
+    assert "__closed__" in fake.calls
+    # caches cleared so the next call rebuilds cleanly
+    assert providers.status()["providers"]["gemini"]["clientBuilt"] is False

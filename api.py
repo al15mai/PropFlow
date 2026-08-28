@@ -1,7 +1,9 @@
 import hashlib
 import os
 import re
+import threading
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Depends, Header
@@ -11,7 +13,35 @@ from fastapi.responses import JSONResponse, FileResponse
 from typing import List, Optional
 from datetime import datetime
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    # Warm the Playwright install off the request path so the first /ai/* call
+    # isn't the one that runs `playwright install chromium` (E5b). Fire-and-
+    # forget; the client build re-checks anyway.
+    def _warm():
+        try:
+            from llm.playwright_setup import ensure_playwright_ready
+
+            ensure_playwright_ready()
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, name="playwright-warmup", daemon=True).start()
+    try:
+        yield
+    finally:
+        # Close every browser on its own worker thread so Chromium doesn't
+        # linger holding a profile lock after the API exits (E5b).
+        try:
+            from llm import providers
+
+            providers.shutdown()
+        except Exception:
+            pass
+
+
+app = FastAPI(lifespan=_lifespan)
 
 # CORS: in production the frontend is served by THIS app (same origin — task D6),
 # so only the local dev servers need listing. (`allow_origins=["*"]` together with

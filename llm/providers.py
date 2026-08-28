@@ -155,6 +155,29 @@ def status() -> dict:
     }
 
 
+def shutdown(timeout_s: float = 20.0) -> None:
+    """Close every browser on ITS OWN worker thread (Playwright sync objects are
+    thread-pinned — closing from another thread poisons the dispatcher). Call
+    from the FastAPI lifespan on exit so Chromium doesn't linger holding a
+    profile lock. Best-effort: a wedged worker is left to `kill_stale_profile_
+    processes` on the next launch."""
+    for provider in set(_workers) | set(_clients):
+        worker = _workers.get(provider)
+        client = _clients.get(provider)
+        if client is None:
+            continue
+        try:
+            if worker is not None:
+                worker.run(lambda c=client: c.close(), timeout_s=timeout_s)
+            else:
+                client.close()
+        except Exception:
+            pass
+    _clients.clear()
+    _workers.clear()
+    _last_ready.clear()
+
+
 def reset() -> None:
     """Test hook — drop cached clients + workers."""
     global _playwright_checked
