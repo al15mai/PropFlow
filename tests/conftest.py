@@ -30,6 +30,11 @@ def _safe_cwd(tmp_path, monkeypatch):
     """
     monkeypatch.setenv("PROPFLOW_DB", str(tmp_path / "api-import.db"))
     monkeypatch.setenv("PROPFLOW_UPLOADS", str(tmp_path / "uploads"))  # task E8
+    monkeypatch.setenv("PROPFLOW_BROWSER_PROFILES", str(tmp_path / "profiles"))  # task E5
+    # No test should ever launch a real browser. Force the API-only path for the
+    # AI fallbacks; the E5 route tests monkeypatch `llm.providers.run_text`.
+    monkeypatch.setenv("AI_INVOICE_MODE", "api")   # task E5
+    monkeypatch.setenv("AI_MESSAGE_MODE", "api")   # task E5
     monkeypatch.chdir(tmp_path)
 
 

@@ -21,6 +21,7 @@ from .base import (
     LLMNotLoggedIn,
     LLMRateLimited,
     LLMUnavailable,
+    extract_json_object,
 )
 from .playwright_setup import ensure_playwright_ready
 from .providers import (
@@ -41,6 +42,7 @@ __all__ = [
     "LLMUnavailable",
     "LLMWorker",
     "ensure_playwright_ready",
+    "extract_json_object",
     "feature_mode",
     "login",
     "reset",

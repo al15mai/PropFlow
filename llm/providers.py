@@ -60,9 +60,18 @@ def _worker_for(provider: str) -> LLMWorker:
     return _workers[provider]
 
 
+_playwright_checked = False
+
+
 def _client_for(provider: str):
     """Build (once) the client. MUST be called on that provider's worker thread."""
+    global _playwright_checked
     if provider not in _clients:
+        if not _playwright_checked:
+            from .playwright_setup import ensure_playwright_ready
+
+            ensure_playwright_ready()
+            _playwright_checked = True
         if provider == "gemini":
             from .gemini_client import GeminiClient
 
@@ -134,6 +143,7 @@ def status() -> dict:
 
 def reset() -> None:
     """Test hook — drop cached clients + workers."""
+    global _playwright_checked
     for c in list(_clients.values()):
         try:
             c.close()
@@ -141,3 +151,4 @@ def reset() -> None:
             pass
     _clients.clear()
     _workers.clear()
+    _playwright_checked = False

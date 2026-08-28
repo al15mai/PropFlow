@@ -103,12 +103,13 @@ def test_extract_uses_a_saved_user_template(client):
         "category": "Utilities", "subcategory": "Trash",
         "fields": {"amount": {"after": "Total de plata", "kind": "money"}},
     }})
-    # feed it a "document" via the store: create a link doc? no — needs a file.
-    # exercise the text path directly through the helper the route uses.
-    from api import _extract_from_text
+    # exercise the same path the route uses: load project templates -> extract -> merge
+    from api import _load_project_templates, _merge_extraction
+    from invoice import extract
 
     text = "SALUBRITATE SA\nFactura salubritate menajera\nTotal de plata 47,00 lei"
-    res = _extract_from_text(text, names=[], places=[], project_id=None)
-    assert res.templateVendor == "Salubritate SA"
-    assert res.parsed["amount"] == 47.0
-    assert res.parsed["subcategory"] == "Trash"
+    res = extract(text, templates=_load_project_templates(None))
+    merged = _merge_extraction(res, {}, source="template")
+    assert merged.templateVendor == "Salubritate SA"
+    assert merged.parsed["amount"] == 47.0
+    assert merged.parsed["subcategory"] == "Trash"

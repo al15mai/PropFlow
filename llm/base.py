@@ -5,8 +5,10 @@ selector is a list, never one hardcoded string).
 """
 from __future__ import annotations
 
+import json
 import os
 import random
+import re
 import time
 from pathlib import Path
 
@@ -100,6 +102,32 @@ _CLOSED_PATTERNS = (
 def looks_like_closed_browser(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(p.lower() in msg for p in _CLOSED_PATTERNS)
+
+
+_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
+
+
+def extract_json_object(raw: str):
+    """Pull a single JSON object out of an LLM answer that may wrap it in prose
+    or a ```json fence. Returns the dict, or None if nothing parses."""
+    if not raw:
+        return None
+    candidates = [raw]
+    m = _FENCE.search(raw)
+    if m:
+        candidates.insert(0, m.group(1))
+    # also try from the first '{' to the last '}'
+    lo, hi = raw.find("{"), raw.rfind("}")
+    if 0 <= lo < hi:
+        candidates.append(raw[lo : hi + 1])
+    for c in candidates:
+        try:
+            val = json.loads(c.strip())
+            if isinstance(val, dict):
+                return val
+        except (ValueError, TypeError):
+            continue
+    return None
 
 
 def first_visible(page, selectors: list):

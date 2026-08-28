@@ -379,17 +379,56 @@ def _load_project_templates(project_id: Optional[str]):
     return out
 
 
-def _extract_from_text(text: str, *, names, places, project_id) -> InvoiceExtraction:
-    from invoice import extract, redact
+_REQUIRED_FIELDS = ("vendor", "amount", "date")
 
-    red = redact(text, names=names, extra=[re.escape(p) for p in places])
-    res = extract(red.text, templates=_load_project_templates(project_id))
+
+async def _invoice_bytes(file, document_id) -> tuple:
+    """Resolve (bytes, is_pdf) from an uploaded file or a stored document id."""
+    if file is not None:
+        data = await file.read()
+        return data, (file.content_type == "application/pdf") or data[:5] == b"%PDF-"
+    if document_id:
+        doc = db.get_document(document_id)
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
+        if doc.storage != "file" or not doc.path:
+            raise HTTPException(status_code=409, detail="That document is a link, not a file")
+        fp = _uploads_dir() / doc.path
+        if not fp.exists():
+            raise HTTPException(status_code=410, detail="File missing on disk")
+        data = fp.read_bytes()
+        return data, (doc.mime == "application/pdf") or data[:5] == b"%PDF-"
+    raise HTTPException(status_code=422, detail="provide a file or a documentId")
+
+
+def _merge_extraction(res, model_fields: dict, *, source: str) -> InvoiceExtraction:
+    """Start from a template `ExtractionResult` (or None) and fill gaps from the
+    model. `dueDate` maps to `dueDate`; everything else lands in `parsed`."""
+    parsed = res.to_parsed_invoice() if res is not None else {
+        "vendor": "", "amount": 0, "date": "", "category": "Utilities",
+        "subcategory": None, "description": "",
+    }
+    due = res.due_date if res is not None else None
+    used_model = False
+    for k in ("vendor", "amount", "date", "category", "subcategory"):
+        empty = not parsed.get(k) or (k == "amount" and not parsed.get("amount"))
+        if empty and model_fields.get(k) not in (None, ""):
+            parsed[k] = model_fields[k]
+            used_model = True
+    if not due and model_fields.get("dueDate"):
+        due = model_fields["dueDate"]
+        used_model = True
+    if used_model and not parsed.get("description"):
+        parsed["description"] = " — ".join(
+            x for x in (parsed.get("vendor"), parsed.get("subcategory")) if x
+        )
+    needs = [f for f in _REQUIRED_FIELDS if not parsed.get(f)]
     return InvoiceExtraction(
-        parsed=res.to_parsed_invoice(),
-        needsReview=sorted(res.needs_review),
-        templateVendor=res.template,
-        dueDate=res.due_date,
-        source=res.source,
+        parsed=parsed, needsReview=needs, dueDate=due,
+        templateVendor=(res.template if res is not None else None),
+        source=("model" if used_model and res is None else
+                "template+model" if used_model else
+                (res.source if res is not None else source)),
     )
 
 
@@ -401,49 +440,30 @@ async def extract_invoice(
     places: Optional[str] = Form(None),  # property city/county to scrub, comma-sep
     projectId: Optional[str] = Form(None),
 ):
-    names_list = _split_names(names)
-    places_list = _split_names(places)
+    from invoice import extract, pdf_to_text, redact
+    from llm import feature_mode
 
-    data: Optional[bytes] = None
-    is_pdf = False
-    if file is not None:
-        data = await file.read()
-        is_pdf = (file.content_type == "application/pdf") or data[:5] == b"%PDF-"
-    elif documentId:
-        doc = db.get_document(documentId)
-        if doc is None:
-            raise HTTPException(status_code=404, detail="Document not found")
-        if doc.storage != "file" or not doc.path:
-            # a link document — fetching it is the E5 fallback's job
-            return InvoiceExtraction(
-                parsed={"vendor": "", "amount": 0, "date": "", "category": "Utilities",
-                        "subcategory": None, "description": ""},
-                needsReview=["vendor", "amount", "date"], source="manual",
-            )
-        fp = _uploads_dir() / doc.path
-        if not fp.exists():
-            raise HTTPException(status_code=410, detail="File missing on disk")
-        data = fp.read_bytes()
-        is_pdf = (doc.mime == "application/pdf") or data[:5] == b"%PDF-"
-    else:
-        raise HTTPException(status_code=422, detail="provide a file or a documentId")
+    names_list, places_list = _split_names(names), _split_names(places)
+    data, is_pdf = await _invoice_bytes(file, documentId)
+    want_model = feature_mode("invoice") in ("browser", "auto")
 
     if not is_pdf:
-        # image invoice — needs the E5 model path; return an empty shell to fill in
-        return InvoiceExtraction(
-            parsed={"vendor": "", "amount": 0, "date": "", "category": "Utilities",
-                    "subcategory": None, "description": ""},
-            needsReview=["vendor", "amount", "date"], source="manual",
-        )
-
-    from invoice import pdf_to_text
+        # image invoice: only the model can read it
+        fields = _model_extract_invoice(image_png=data) if want_model else {}
+        return _merge_extraction(None, fields, source="manual")
 
     try:
-        text = pdf_to_text(data)
+        raw = pdf_to_text(data)
     except Exception:
         raise HTTPException(status_code=422, detail="could not read the PDF")
 
-    return _extract_from_text(text, names=names_list, places=places_list, project_id=projectId)
+    red = redact(raw, names=names_list, extra=[re.escape(p) for p in places_list])
+    res = extract(red.text, templates=_load_project_templates(projectId))
+
+    fields = {}
+    if want_model and (res.template is None or res.needs_review):
+        fields = _model_extract_invoice(text=red.text)
+    return _merge_extraction(res, fields, source="template")
 
 
 @app.get("/invoice-templates", response_model=List[InvoiceTemplate])
@@ -591,6 +611,123 @@ def change_password(body: LoginRequest, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
     db.set_user_password(user.id, auth.hash_password(body.password))
     return
+
+
+# --- Browser-LLM automation (task E5) -------------------------------------
+#
+# Thin wrappers over `llm.providers.run_text(...)`. The heavy lifting (one
+# persistent logged-in browser per provider, driven from its own worker
+# thread) is in PropFlow/llm/. Every `LLMError` becomes a clean 503, never a
+# 500 stack trace. The one-time provider login is done out of band via
+# scripts/propflow_login_vnc.sh -> POST /ai/login.
+
+_INVOICE_PROMPT = (
+    "You are reading a Romanian utility invoice. Personal data has been redacted "
+    "as [redacted] — ignore those. Reply with ONLY a JSON object, no prose, no code "
+    "fence, with these keys: vendor (string), amount (number, the current total to "
+    "pay, in lei), date (string 'YYYY-MM-DD', the invoice/issue date), dueDate "
+    "(string 'YYYY-MM-DD' or null), category (one of \"Utilities\",\"Maintenance\","
+    "\"Tax\",\"Insurance\",\"Other\"), subcategory (e.g. \"Electricity\",\"Gas\","
+    "\"Water\",\"Internet\",\"Trash\" or null). Use null when a value isn't present.\n\n"
+)
+
+
+def _ai_error(exc: Exception):
+    from llm import LLMNotLoggedIn, LLMRateLimited, LLMUnavailable
+
+    if isinstance(exc, LLMNotLoggedIn):
+        return HTTPException(status_code=503, detail="ai_not_logged_in")
+    if isinstance(exc, LLMRateLimited):
+        return HTTPException(status_code=503, detail="ai_rate_limited")
+    if isinstance(exc, LLMUnavailable):
+        return HTTPException(status_code=503, detail="ai_unavailable")
+    return HTTPException(status_code=503, detail=f"ai_error: {exc}")
+
+
+def _model_extract_invoice(*, text: Optional[str] = None,
+                           image_png: Optional[bytes] = None) -> dict:
+    """Ask the browser LLM to read one invoice. Returns a partial
+    ParsedInvoice-ish dict, or {} on any failure (caller keeps what it had)."""
+    from llm import extract_json_object, providers
+
+    prompt = _INVOICE_PROMPT + (f"Invoice text:\n{text}" if text else "See the attached image.")
+    try:
+        answer = providers.run_text(lambda c: c.ask(prompt, image_png=image_png))
+    except Exception:
+        return {}
+    data = extract_json_object(answer) or {}
+    out: dict = {}
+    if isinstance(data.get("vendor"), str) and data["vendor"].strip():
+        out["vendor"] = data["vendor"].strip()
+    if isinstance(data.get("amount"), (int, float)):
+        out["amount"] = round(float(data["amount"]), 2)
+    for k in ("date", "dueDate", "subcategory"):
+        if isinstance(data.get(k), str) and data[k].strip():
+            out[k] = data[k].strip()
+    if data.get("category") in ("Utilities", "Maintenance", "Tax", "Insurance", "Other"):
+        out["category"] = data["category"]
+    return out
+
+
+@app.get("/ai/status")
+def ai_status():
+    from llm import providers
+
+    return providers.status()
+
+
+@app.post("/ai/login")
+def ai_login(provider: str = Form(...)):
+    from llm import providers
+
+    try:
+        return providers.login(provider)
+    except Exception as e:
+        raise _ai_error(e)
+
+
+@app.post("/ai/message")
+def ai_message(body: dict):
+    """Browser fallback for `generateTenantCommunication` (E6). The frontend
+    composes the prompt and posts `{prompt}`; we return `{text}`."""
+    prompt = (body or {}).get("prompt", "").strip()
+    if not prompt:
+        raise HTTPException(status_code=422, detail="prompt is required")
+    from llm import providers
+
+    try:
+        return {"text": providers.run_text(lambda c: c.ask(prompt))}
+    except Exception as e:
+        raise _ai_error(e)
+
+
+@app.post("/ai/extract-invoice", response_model=InvoiceExtraction)
+async def ai_extract_invoice(
+    file: Optional[UploadFile] = File(None),
+    documentId: Optional[str] = Form(None),
+    names: Optional[str] = Form(None),
+    places: Optional[str] = Form(None),
+):
+    """Force the model path for one invoice (image, scanned PDF, or a vendor no
+    template knows). PII is redacted before anything is sent."""
+    data, is_pdf = await _invoice_bytes(file, documentId)
+    names_list, places_list = _split_names(names), _split_names(places)
+
+    if is_pdf:
+        from invoice import pdf_to_text, redact
+
+        try:
+            raw = pdf_to_text(data)
+        except Exception:
+            raise HTTPException(status_code=422, detail="could not read the PDF")
+        red = redact(raw, names=names_list, extra=[re.escape(p) for p in places_list])
+        fields = _model_extract_invoice(text=red.text)
+    else:
+        fields = _model_extract_invoice(image_png=data)
+
+    if not fields:
+        raise HTTPException(status_code=503, detail="ai_error: no usable answer")
+    return _merge_extraction(None, fields, source="model")
 
 
 # --- Static frontend bundle (task D6) ---------------------------------------
