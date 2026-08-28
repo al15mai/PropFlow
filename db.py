@@ -149,7 +149,8 @@ class SQLiteDatabase(DatabaseInterface):
                 leaseStart TEXT,
                 leaseEnd TEXT,
                 deposit REAL,
-                status TEXT
+                status TEXT,
+                rentDueDay INTEGER
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
@@ -297,7 +298,7 @@ class SQLiteDatabase(DatabaseInterface):
     def create_tenant(self, t: Tenant) -> Tenant:
         cur = self._cursor()
         cur.execute(
-            "INSERT INTO tenants (id,propertyId,name,email,phone,leaseStart,leaseEnd,deposit,status) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tenants (id,propertyId,name,email,phone,leaseStart,leaseEnd,deposit,status,rentDueDay) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (
                 t.id,
                 t.propertyId,
@@ -308,6 +309,7 @@ class SQLiteDatabase(DatabaseInterface):
                 t.leaseEnd,
                 t.deposit,
                 t.status,
+                t.rentDueDay,
             ),
         )
         assert self.conn is not None
@@ -317,7 +319,7 @@ class SQLiteDatabase(DatabaseInterface):
     def update_tenant(self, id: str, t: Tenant) -> Tenant:
         cur = self._cursor()
         cur.execute(
-            "UPDATE tenants SET propertyId=?,name=?,email=?,phone=?,leaseStart=?,leaseEnd=?,deposit=?,status=? WHERE id=?",
+            "UPDATE tenants SET propertyId=?,name=?,email=?,phone=?,leaseStart=?,leaseEnd=?,deposit=?,status=?,rentDueDay=? WHERE id=?",
             (
                 t.propertyId,
                 t.name,
@@ -327,6 +329,7 @@ class SQLiteDatabase(DatabaseInterface):
                 t.leaseEnd,
                 t.deposit,
                 t.status,
+                t.rentDueDay,
                 id,
             ),
         )

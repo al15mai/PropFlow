@@ -33,6 +33,13 @@ class Tenant(BaseModel):
     leaseEnd: str
     deposit: float
     status: Literal["Active", "Past", "Late"]
+    # Day of the month (1-28) rent is due for this tenant, used by the alerts
+    # engine's rent-late check (task E1). Null -> treated as the 1st, matching the
+    # rent obligations allocateTenantFunds() dates to `<month>-01`.
+    rentDueDay: Optional[int] = None
+
+    class Config:
+        extra = "ignore"
 
 
 TransactionType = Literal["Income", "Expense"]
