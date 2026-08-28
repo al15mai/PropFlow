@@ -34,13 +34,15 @@ from models import (
 from db import SQLiteDatabase
 from system_update import get_git_status
 
-# Uploaded document files live next to the DB (data is tiny). Anchored to this
-# file, override with $PROPFLOW_UPLOADS (the test suite points it at a tmp dir).
-# Resolved per-call so tests get an isolated dir without monkeypatching.
+# Uploaded document files live OUTSIDE the repo tree (task E8b decision) so a
+# `git clean` / redeploy never wipes them and backups can cover them alongside
+# data.db. Default: ~/propflow-data/uploads. Production MUST set $PROPFLOW_UPLOADS
+# (the test suite points it at a tmp dir). Resolved per-call so tests get an
+# isolated dir without monkeypatching.
 def _uploads_dir() -> Path:
     d = Path(
         os.environ.get("PROPFLOW_UPLOADS")
-        or (Path(__file__).resolve().parent / "uploads")
+        or (Path.home() / "propflow-data" / "uploads")
     )
     d.mkdir(parents=True, exist_ok=True)
     return d

@@ -174,7 +174,7 @@ class SQLiteDatabase(DatabaseInterface):
                 tenantId TEXT,
                 paymentMethod TEXT,
                 isReimbursable INTEGER,
-                attachmentUrl TEXT,
+                attachmentUrl TEXT,  -- DEPRECATED (task E8b): superseded by the `documents` table; no longer read/written. Migration 007 drops it.
                 isPaid INTEGER,
                 currency TEXT,
                 fxRate REAL,
@@ -449,7 +449,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid,currency,fxRate,amountBase,maintenanceId,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,isPaid,currency,fxRate,amountBase,maintenanceId,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tx.id,
                 tx.date,
@@ -462,7 +462,6 @@ class SQLiteDatabase(DatabaseInterface):
                 tx.tenantId,
                 tx.paymentMethod,
                 int(bool(tx.isReimbursable)),
-                tx.attachmentUrl,
                 int(bool(tx.isPaid)),
                 currency,
                 fx_rate,
@@ -481,7 +480,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=?,currency=?,fxRate=?,amountBase=?,maintenanceId=?,projectId=COALESCE(?,projectId) WHERE id=?",
+            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,isPaid=?,currency=?,fxRate=?,amountBase=?,maintenanceId=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 tx.date,
                 tx.amount,
@@ -493,7 +492,6 @@ class SQLiteDatabase(DatabaseInterface):
                 tx.tenantId,
                 tx.paymentMethod,
                 int(bool(tx.isReimbursable)),
-                tx.attachmentUrl,
                 int(bool(tx.isPaid)),
                 currency,
                 fx_rate,

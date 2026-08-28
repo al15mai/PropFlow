@@ -12,7 +12,7 @@ from models import Transaction
 
 FIELDS = [
     "id", "date", "amount", "type", "category", "subcategory", "description",
-    "propertyId", "tenantId", "paymentMethod", "isReimbursable", "attachmentUrl", "isPaid",
+    "propertyId", "tenantId", "paymentMethod", "isReimbursable", "isPaid",
 ]
 
 

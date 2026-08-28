@@ -73,7 +73,6 @@ class Transaction(BaseModel):
     tenantId: Optional[str] = None
     paymentMethod: PaymentMethod
     isReimbursable: Optional[bool] = False
-    attachmentUrl: Optional[str] = None
     isPaid: Optional[bool] = False
     # Multi-currency (task A4). Legacy rows leave these null and are treated as base (RON).
     currency: Optional[str] = None          # currency `amount` is denominated in
