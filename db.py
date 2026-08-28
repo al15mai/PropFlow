@@ -184,7 +184,6 @@ class SQLiteDatabase(DatabaseInterface):
                 tenantId TEXT,
                 paymentMethod TEXT,
                 isReimbursable INTEGER,
-                attachmentUrl TEXT,  -- DEPRECATED (task E8b): superseded by the `documents` table; no longer read/written. Migration 007 drops it.
                 isPaid INTEGER,
                 currency TEXT,
                 fxRate REAL,
