@@ -29,6 +29,7 @@ def _safe_cwd(tmp_path, monkeypatch):
       ``data.db`` relative to cwd.
     """
     monkeypatch.setenv("PROPFLOW_DB", str(tmp_path / "api-import.db"))
+    monkeypatch.setenv("PROPFLOW_UPLOADS", str(tmp_path / "uploads"))  # task E8
     monkeypatch.chdir(tmp_path)
 
 

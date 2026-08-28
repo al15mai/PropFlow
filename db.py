@@ -12,6 +12,7 @@ from models import (
     MaintenanceRequest,
     Alert,
     LandlordSettings,
+    Document,
 )
 
 
@@ -210,6 +211,21 @@ class SQLiteDatabase(DatabaseInterface):
                 companyName TEXT,
                 currency TEXT,
                 language TEXT
+            )""")
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                transactionId TEXT,
+                kind TEXT,
+                filename TEXT,
+                mime TEXT,
+                size INTEGER,
+                storage TEXT,
+                path TEXT,
+                url TEXT,
+                sha256 TEXT,
+                note TEXT,
+                createdAt TEXT
             )""")
         assert self.conn is not None
         self.conn.commit()
@@ -584,3 +600,97 @@ class SQLiteDatabase(DatabaseInterface):
         assert self.conn is not None
         self.conn.commit()
         return s
+
+    # --- Documents (task E8) ---
+    _DOC_COLS = (
+        "id,transactionId,kind,filename,mime,size,storage,path,url,sha256,note,createdAt"
+    )
+
+    def create_document(self, d: Document) -> Document:
+        cur = self._cursor()
+        cur.execute(
+            f"INSERT INTO documents ({self._DOC_COLS}) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                d.id,
+                d.transactionId,
+                d.kind,
+                d.filename,
+                d.mime,
+                d.size,
+                d.storage,
+                d.path,
+                d.url,
+                d.sha256,
+                d.note or "",
+                d.createdAt,
+            ),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+        return d
+
+    def get_document(self, id: str) -> Optional[Document]:
+        cur = self._cursor()
+        row = cur.execute("SELECT * FROM documents WHERE id = ?", (id,)).fetchone()
+        return Document(**self._row_to_dict(row)) if row else None
+
+    def list_documents(
+        self,
+        transactionId: Optional[str] = None,
+        tenantId: Optional[str] = None,
+        pending: Optional[bool] = None,
+    ) -> List[Document]:
+        cur = self._cursor()
+        clauses: List[str] = []
+        params: List[Any] = []
+        if transactionId is not None:
+            clauses.append("d.transactionId = ?")
+            params.append(transactionId)
+        if tenantId is not None:
+            # a tenant sees a document through their transactions
+            clauses.append(
+                "d.transactionId IN (SELECT id FROM transactions WHERE tenantId = ?)"
+            )
+            params.append(tenantId)
+        if pending is True:
+            clauses.append("d.transactionId IS NULL")
+        elif pending is False:
+            clauses.append("d.transactionId IS NOT NULL")
+        q = "SELECT d.* FROM documents d"
+        if clauses:
+            q += " WHERE " + " AND ".join(clauses)
+        q += " ORDER BY d.createdAt DESC"
+        rows = cur.execute(q, params).fetchall()
+        return [Document(**self._row_to_dict(r)) for r in rows]
+
+    def update_document(self, id: str, **fields) -> Document:
+        allowed = {"transactionId", "kind", "note"}
+        sets = {k: v for k, v in fields.items() if k in allowed}
+        if not sets:
+            doc = self.get_document(id)
+            if doc is None:
+                raise KeyError("Document not found")
+            return doc
+        cur = self._cursor()
+        cur.execute(
+            f"UPDATE documents SET {', '.join(f'{k}=?' for k in sets)} WHERE id=?",
+            (*sets.values(), id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError("Document not found")
+        assert self.conn is not None
+        self.conn.commit()
+        got = self.get_document(id)
+        assert got is not None
+        return got
+
+    def delete_document(self, id: str) -> Optional[Document]:
+        """Delete the row, returning it so the caller can unlink the file."""
+        doc = self.get_document(id)
+        if doc is None:
+            return None
+        cur = self._cursor()
+        cur.execute("DELETE FROM documents WHERE id = ?", (id,))
+        assert self.conn is not None
+        self.conn.commit()
+        return doc

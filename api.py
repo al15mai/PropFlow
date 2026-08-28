@@ -1,10 +1,12 @@
+import hashlib
 import os
+import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from typing import List, Optional
 from datetime import datetime
 
@@ -26,10 +28,22 @@ from models import (
     MaintenanceRequest,
     Alert,
     LandlordSettings,
+    Document,
 )
 
 from db import SQLiteDatabase
 from system_update import get_git_status
+
+# Uploaded document files live next to the DB (data is tiny). Anchored to this
+# file, override with $PROPFLOW_UPLOADS (the test suite points it at a tmp dir).
+# Resolved per-call so tests get an isolated dir without monkeypatching.
+def _uploads_dir() -> Path:
+    d = Path(
+        os.environ.get("PROPFLOW_UPLOADS")
+        or (Path(__file__).resolve().parent / "uploads")
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 # The DB path is anchored to this file, NOT the process cwd. There used to be a
 # second, empty `data.db` at the repo root that got picked up whenever the server
@@ -222,6 +236,101 @@ def list_alerts():
 def save_settings(s: LandlordSettings):
     db.save_settings(s)
     return s
+
+
+# --- Documents (task E8) ---
+_EXT_BY_MIME = {
+    "application/pdf": ".pdf",
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+}
+
+
+def _doc_response(doc: Document) -> dict:
+    """What the client gets back — includes a ready-to-use fetch URL."""
+    out = doc.model_dump()
+    out["fileUrl"] = f"/documents/{doc.id}/file" if doc.storage == "file" else doc.url
+    return out
+
+
+@app.get("/documents")
+def list_documents(
+    transactionId: Optional[str] = None,
+    tenantId: Optional[str] = None,
+    pending: Optional[bool] = None,
+):
+    return [_doc_response(d) for d in db.list_documents(transactionId, tenantId, pending)]
+
+
+@app.post("/documents", status_code=201)
+async def create_document(
+    file: Optional[UploadFile] = File(None),
+    url: Optional[str] = Form(None),
+    transactionId: Optional[str] = Form(None),
+    kind: str = Form("other"),
+    note: str = Form(""),
+    filename: Optional[str] = Form(None),
+):
+    if kind not in ("invoice", "receipt", "bill", "other"):
+        kind = "other"
+    doc_id = uuid.uuid4().hex
+    created = now_iso()
+
+    if file is not None:
+        data = await file.read()
+        sha = hashlib.sha256(data).hexdigest()
+        mime = file.content_type or "application/octet-stream"
+        orig = filename or file.filename or "document"
+        ext = Path(orig).suffix or _EXT_BY_MIME.get(mime, "")
+        rel = f"{doc_id}{ext}"
+        (_uploads_dir() / rel).write_bytes(data)
+        doc = Document(
+            id=doc_id, transactionId=transactionId or None, kind=kind, filename=orig,
+            mime=mime, size=len(data), storage="file", path=rel, sha256=sha,
+            note=note, createdAt=created,
+        )
+    elif url:
+        doc = Document(
+            id=doc_id, transactionId=transactionId or None, kind=kind,
+            filename=url.rsplit("/", 1)[-1] or "link", storage="link", url=url,
+            note=note, createdAt=created,
+        )
+    else:
+        raise HTTPException(status_code=422, detail="provide a file or a url")
+
+    db.create_document(doc)
+    return _doc_response(doc)
+
+
+@app.get("/documents/{id}/file")
+def get_document_file(id: str):
+    doc = db.get_document(id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.storage != "file" or not doc.path:
+        raise HTTPException(status_code=409, detail="This document is a link, not a stored file")
+    fp = _uploads_dir() / doc.path
+    if not fp.exists():
+        raise HTTPException(status_code=410, detail="File missing on disk")
+    return FileResponse(fp, media_type=doc.mime or "application/octet-stream", filename=doc.filename)
+
+
+@app.put("/documents/{id}", response_model=Document)
+def update_document(id: str, patch: dict):
+    try:
+        return db.update_document(id, **patch)
+    except KeyError:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+
+@app.delete("/documents/{id}", status_code=204)
+def delete_document(id: str):
+    doc = db.delete_document(id)
+    if doc and doc.storage == "file" and doc.path:
+        (_uploads_dir() / doc.path).unlink(missing_ok=True)
+    return
 
 
 def main():

@@ -122,3 +122,31 @@ class LandlordSettings(BaseModel):
     companyName: str
     currency: str
     language: Literal["en", "ro"]
+
+
+DocumentKind = Literal["invoice", "receipt", "bill", "other"]
+DocumentStorage = Literal["file", "link"]
+
+
+class Document(BaseModel):
+    """An invoice / receipt / bill attached to a transaction (task E8).
+
+    One transaction -> many documents. Tenant/property are NOT stored here; the
+    tenant sees a document because it hangs off one of their transactions.
+    `transactionId` is null only for a short-lived 'pending' upload (E7 scan-first).
+    """
+    id: str
+    transactionId: Optional[str] = None
+    kind: DocumentKind = "other"
+    filename: str
+    mime: Optional[str] = None
+    size: Optional[int] = None
+    storage: DocumentStorage
+    path: Optional[str] = None   # relative to the uploads dir, when storage == "file"
+    url: Optional[str] = None    # the original link, when storage == "link"
+    sha256: Optional[str] = None
+    note: Optional[str] = ""
+    createdAt: str
+
+    class Config:
+        extra = "ignore"
