@@ -121,6 +121,10 @@ class SQLiteDatabase(DatabaseInterface):
         if self.conn is None:
             self.conn = sqlite3.connect(self.path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
+            # WAL: readers don't block the writer and vice-versa — a cheap
+            # concurrency win now that several code paths touch the DB (task C6).
+            # Persists on the DB file; harmless for the temp-file test DBs.
+            self.conn.execute("PRAGMA journal_mode=WAL")
 
     def _cursor(self) -> Cursor:
         """Return a DB cursor ensuring the connection is initialized.

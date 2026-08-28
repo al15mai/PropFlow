@@ -1,0 +1,32 @@
+[project]
+name = "propflow-backend"
+version = "0.0.2"
+description = "PropFlow backend — FastAPI + stdlib sqlite3 (no ORM at this stage; see task C4)."
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi==0.104.1",
+    "uvicorn[standard]==0.24.0",
+    "pydantic==2.12.5",
+    "python-multipart>=0.0.9",  # document upload endpoints (task E8)
+    "pdfplumber>=0.11",         # invoice text-layer extraction (task E7)
+    "pypdf>=4",                 # invoice page handling (task E7)
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",  # only for tooling; the API tests use tests/_asgi.py, not TestClient
+]
+
+# Raw-sqlite backend for now. SQLAlchemy / SQLModel / auth (bcrypt, passlib,
+# python-jose) are intentionally NOT declared — they come with the ORM port (C4)
+# and auth (D1), each on its own branch. `playwright` lands here with E5.
+
+[tool.uv]
+# This is an app, not a library — don't build/install it, just manage the env.
+package = false
+# `uv lock` / `uv sync` fail behind the corp TLS MITM without this — it makes uv
+# use the OS (Windows) certificate store instead of its bundled roots.
+native-tls = true
+
+# pytest config stays in pytest.ini (pytest reads that first when it exists).
