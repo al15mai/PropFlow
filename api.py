@@ -60,8 +60,12 @@ def admin_version():
 
 # --- Properties ---
 @app.get("/properties", response_model=List[Property])
-def list_properties(type: Optional[str] = None, status: Optional[str] = None):
-    return db.list_properties(type=type, status=status)
+def list_properties(
+    type: Optional[str] = None,
+    status: Optional[str] = None,
+    projectId: Optional[str] = None,
+):
+    return db.list_properties(type=type, status=status, projectId=projectId)
 
 
 @app.post("/properties", response_model=Property)
@@ -87,8 +91,12 @@ def delete_property(id: str):
 
 # --- Tenants ---
 @app.get("/tenants", response_model=List[Tenant])
-def list_tenants(propertyId: Optional[str] = None, status: Optional[str] = None):
-    return db.list_tenants(propertyId=propertyId, status=status)
+def list_tenants(
+    propertyId: Optional[str] = None,
+    status: Optional[str] = None,
+    projectId: Optional[str] = None,
+):
+    return db.list_tenants(propertyId=propertyId, status=status, projectId=projectId)
 
 
 @app.post("/tenants", response_model=Tenant)
@@ -121,6 +129,7 @@ def list_transactions(
     propertyId: Optional[str] = None,
     tenantId: Optional[str] = None,
     maintenanceId: Optional[str] = None,
+    projectId: Optional[str] = None,
 ):
     return db.list_transactions(
         startDate=startDate,
@@ -129,6 +138,7 @@ def list_transactions(
         propertyId=propertyId,
         tenantId=tenantId,
         maintenanceId=maintenanceId,
+        projectId=projectId,
     )
 
 
@@ -173,8 +183,11 @@ def list_maintenance(
     status: Optional[str] = None,
     propertyId: Optional[str] = None,
     tenantId: Optional[str] = None,
+    projectId: Optional[str] = None,
 ):
-    return db.list_maintenance(status=status, propertyId=propertyId, tenantId=tenantId)
+    return db.list_maintenance(
+        status=status, propertyId=propertyId, tenantId=tenantId, projectId=projectId
+    )
 
 
 @app.post("/maintenance", response_model=MaintenanceRequest)

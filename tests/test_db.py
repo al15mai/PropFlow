@@ -233,3 +233,75 @@ def test_update_backfills_property_id(db_with_tenant):
     db_with_tenant.update_transaction("a", mk(id="a", tenantId="ten-6", propertyId=None))
     (got,) = db_with_tenant.list_transactions()
     assert got.propertyId == "unit-6"
+
+
+# --- project scoping (task D4b) --------------------------------------------
+
+def _prop(**kw):
+    from models import Property
+    base = dict(id="p", address="A", unitNumber="1", rooms=1, rentAmount=1000,
+                currency="RON", status="Vacant", type="Rental")
+    base.update(kw)
+    return Property(**base)
+
+
+def _maint(**kw):
+    from models import MaintenanceRequest
+    base = dict(id="m", propertyId="p", title="x", description="y",
+                priority="Low", status="Open", dateReported="2026-01-01")
+    base.update(kw)
+    return MaintenanceRequest(**base)
+
+
+def test_transactions_scoped_by_project_do_not_leak(database):
+    database.create_transaction(mk(id="a", projectId="proj-A"))
+    database.create_transaction(mk(id="b", projectId="proj-B"))
+    database.create_transaction(mk(id="legacy", projectId=None))
+
+    a = {t.id for t in database.list_transactions(projectId="proj-A")}
+    b = {t.id for t in database.list_transactions(projectId="proj-B")}
+    assert a == {"a", "legacy"}   # own rows + shared/legacy NULL rows
+    assert b == {"b", "legacy"}
+    assert "b" not in a and "a" not in b
+
+
+def test_no_project_filter_returns_every_transaction(database):
+    database.create_transaction(mk(id="a", projectId="proj-A"))
+    database.create_transaction(mk(id="b", projectId="proj-B"))
+    assert {t.id for t in database.list_transactions()} == {"a", "b"}
+
+
+def test_transaction_project_id_round_trips_and_update_preserves_it(database):
+    database.create_transaction(mk(id="a", projectId="proj-A"))
+    (got,) = database.list_transactions()
+    assert got.projectId == "proj-A"
+    # an edit that omits projectId (null) must not un-scope the row
+    database.update_transaction("a", mk(id="a", amount=999, projectId=None))
+    (got,) = database.list_transactions(projectId="proj-A")
+    assert got.projectId == "proj-A" and got.amount == 999
+
+
+def test_properties_scoped_by_project(database):
+    database.create_property(_prop(id="pa", projectId="proj-A"))
+    database.create_property(_prop(id="pb", projectId="proj-B"))
+    database.create_property(_prop(id="shared", projectId=None))
+    assert {p.id for p in database.list_properties(projectId="proj-A")} == {"pa", "shared"}
+    assert {p.id for p in database.list_properties(projectId="proj-B")} == {"pb", "shared"}
+
+
+def test_tenants_scoped_by_project(database):
+    from models import Tenant
+    def ten(i, pid):
+        return Tenant(id=i, propertyId="p", name=i, email="-", phone="-",
+                      leaseStart="2026-01-01", leaseEnd="2027-01-01", deposit=0,
+                      status="Active", projectId=pid)
+    database.create_tenant(ten("ta", "proj-A"))
+    database.create_tenant(ten("tb", "proj-B"))
+    assert {t.id for t in database.list_tenants(projectId="proj-A")} == {"ta"}
+
+
+def test_maintenance_scoped_by_project(database):
+    database.create_maintenance(_maint(id="ma", projectId="proj-A"))
+    database.create_maintenance(_maint(id="mb", projectId="proj-B"))
+    database.create_maintenance(_maint(id="shared", projectId=None))
+    assert {m.id for m in database.list_maintenance(projectId="proj-A")} == {"ma", "shared"}

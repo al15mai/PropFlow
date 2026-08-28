@@ -18,6 +18,8 @@ class Property(BaseModel):
     # RON (landlord base) per 1 unit of `currency`. None / 1.0 for RON properties.
     # Used to value this property's rent obligation in base currency (task A4).
     fxRate: Optional[float] = None
+    # Workspace this belongs to (task D4b). Null = legacy / shared across projects.
+    projectId: Optional[str] = None
 
     class Config:
         extra = "ignore"
@@ -37,6 +39,8 @@ class Tenant(BaseModel):
     # engine's rent-late check (task E1). Null -> treated as the 1st, matching the
     # rent obligations allocateTenantFunds() dates to `<month>-01`.
     rentDueDay: Optional[int] = None
+    # Workspace this belongs to (task D4b). Null = legacy / shared across projects.
+    projectId: Optional[str] = None
 
     class Config:
         extra = "ignore"
@@ -96,6 +100,11 @@ class MaintenanceRequest(BaseModel):
     priority: RequestPriority
     status: RequestStatus
     dateReported: str
+    # Workspace this belongs to (task D4b). Null = legacy / shared across projects.
+    projectId: Optional[str] = None
+
+    class Config:
+        extra = "ignore"
 
 
 class Alert(BaseModel):

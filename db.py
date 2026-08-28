@@ -23,7 +23,10 @@ class DatabaseInterface(ABC):
     # Properties
     @abstractmethod
     def list_properties(
-        self, type: Optional[str] = None, status: Optional[str] = None
+        self,
+        type: Optional[str] = None,
+        status: Optional[str] = None,
+        projectId: Optional[str] = None,
     ) -> List[Property]:
         pass
 
@@ -42,7 +45,10 @@ class DatabaseInterface(ABC):
     # Tenants
     @abstractmethod
     def list_tenants(
-        self, propertyId: Optional[str] = None, status: Optional[str] = None
+        self,
+        propertyId: Optional[str] = None,
+        status: Optional[str] = None,
+        projectId: Optional[str] = None,
     ) -> List[Tenant]:
         pass
 
@@ -137,7 +143,8 @@ class SQLiteDatabase(DatabaseInterface):
                 status TEXT,
                 type TEXT,
                 image TEXT,
-                fxRate REAL
+                fxRate REAL,
+                projectId TEXT
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS tenants (
@@ -150,7 +157,8 @@ class SQLiteDatabase(DatabaseInterface):
                 leaseEnd TEXT,
                 deposit REAL,
                 status TEXT,
-                rentDueDay INTEGER
+                rentDueDay INTEGER,
+                projectId TEXT
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
@@ -170,7 +178,8 @@ class SQLiteDatabase(DatabaseInterface):
                 currency TEXT,
                 fxRate REAL,
                 amountBase REAL,
-                maintenanceId TEXT
+                maintenanceId TEXT,
+                projectId TEXT
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS maintenance (
@@ -181,7 +190,8 @@ class SQLiteDatabase(DatabaseInterface):
                 description TEXT,
                 priority TEXT,
                 status TEXT,
-                dateReported TEXT
+                dateReported TEXT,
+                projectId TEXT
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS alerts (
@@ -207,9 +217,21 @@ class SQLiteDatabase(DatabaseInterface):
     def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         return {k: row[k] for k in row.keys()}
 
+    @staticmethod
+    def _project_filter(project_id: Optional[str]) -> tuple:
+        """Lenient project scoping (task D4b): a NULL-project row is 'legacy / shared'
+        and shows in every workspace; a row with a projectId shows only in that one.
+        No projectId asked for -> no clause (returns everything)."""
+        if not project_id:
+            return "", []
+        return "(projectId IS NULL OR projectId = ?)", [project_id]
+
     # --- Properties ---
     def list_properties(
-        self, type: Optional[str] = None, status: Optional[str] = None
+        self,
+        type: Optional[str] = None,
+        status: Optional[str] = None,
+        projectId: Optional[str] = None,
     ) -> List[Property]:
         cur = self._cursor()
         q = "SELECT * FROM properties"
@@ -221,6 +243,10 @@ class SQLiteDatabase(DatabaseInterface):
         if status:
             clauses.append("status = ?")
             params.append(status)
+        proj_clause, proj_params = self._project_filter(projectId)
+        if proj_clause:
+            clauses.append(proj_clause)
+            params.extend(proj_params)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
@@ -229,7 +255,7 @@ class SQLiteDatabase(DatabaseInterface):
     def create_property(self, p: Property) -> Property:
         cur = self._cursor()
         cur.execute(
-            "INSERT INTO properties (id,address,unitNumber,rooms,rentAmount,currency,status,type,image,fxRate) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO properties (id,address,unitNumber,rooms,rentAmount,currency,status,type,image,fxRate,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 p.id,
                 p.address,
@@ -241,6 +267,7 @@ class SQLiteDatabase(DatabaseInterface):
                 p.type,
                 p.image,
                 p.fxRate,
+                p.projectId,
             ),
         )
         assert self.conn is not None
@@ -250,7 +277,7 @@ class SQLiteDatabase(DatabaseInterface):
     def update_property(self, id: str, p: Property) -> Property:
         cur = self._cursor()
         cur.execute(
-            "UPDATE properties SET address=?,unitNumber=?,rooms=?,rentAmount=?,currency=?,status=?,type=?,image=?,fxRate=? WHERE id=?",
+            "UPDATE properties SET address=?,unitNumber=?,rooms=?,rentAmount=?,currency=?,status=?,type=?,image=?,fxRate=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 p.address,
                 p.unitNumber,
@@ -261,6 +288,7 @@ class SQLiteDatabase(DatabaseInterface):
                 p.type,
                 p.image,
                 p.fxRate,
+                p.projectId,
                 id,
             ),
         )
@@ -278,7 +306,10 @@ class SQLiteDatabase(DatabaseInterface):
 
     # --- Tenants ---
     def list_tenants(
-        self, propertyId: Optional[str] = None, status: Optional[str] = None
+        self,
+        propertyId: Optional[str] = None,
+        status: Optional[str] = None,
+        projectId: Optional[str] = None,
     ) -> List[Tenant]:
         cur = self._cursor()
         q = "SELECT * FROM tenants"
@@ -290,6 +321,10 @@ class SQLiteDatabase(DatabaseInterface):
         if status:
             clauses.append("status = ?")
             params.append(status)
+        proj_clause, proj_params = self._project_filter(projectId)
+        if proj_clause:
+            clauses.append(proj_clause)
+            params.extend(proj_params)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
@@ -298,7 +333,7 @@ class SQLiteDatabase(DatabaseInterface):
     def create_tenant(self, t: Tenant) -> Tenant:
         cur = self._cursor()
         cur.execute(
-            "INSERT INTO tenants (id,propertyId,name,email,phone,leaseStart,leaseEnd,deposit,status,rentDueDay) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tenants (id,propertyId,name,email,phone,leaseStart,leaseEnd,deposit,status,rentDueDay,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (
                 t.id,
                 t.propertyId,
@@ -310,6 +345,7 @@ class SQLiteDatabase(DatabaseInterface):
                 t.deposit,
                 t.status,
                 t.rentDueDay,
+                t.projectId,
             ),
         )
         assert self.conn is not None
@@ -319,7 +355,7 @@ class SQLiteDatabase(DatabaseInterface):
     def update_tenant(self, id: str, t: Tenant) -> Tenant:
         cur = self._cursor()
         cur.execute(
-            "UPDATE tenants SET propertyId=?,name=?,email=?,phone=?,leaseStart=?,leaseEnd=?,deposit=?,status=?,rentDueDay=? WHERE id=?",
+            "UPDATE tenants SET propertyId=?,name=?,email=?,phone=?,leaseStart=?,leaseEnd=?,deposit=?,status=?,rentDueDay=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 t.propertyId,
                 t.name,
@@ -330,6 +366,7 @@ class SQLiteDatabase(DatabaseInterface):
                 t.deposit,
                 t.status,
                 t.rentDueDay,
+                t.projectId,
                 id,
             ),
         )
@@ -360,6 +397,10 @@ class SQLiteDatabase(DatabaseInterface):
                 else:
                     clauses.append(f"{key} = ?")
                 params.append(filters[key])
+        proj_clause, proj_params = self._project_filter(filters.get("projectId"))
+        if proj_clause:
+            clauses.append(proj_clause)
+            params.extend(proj_params)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
@@ -392,7 +433,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid,currency,fxRate,amountBase,maintenanceId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,attachmentUrl,isPaid,currency,fxRate,amountBase,maintenanceId,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tx.id,
                 tx.date,
@@ -411,6 +452,7 @@ class SQLiteDatabase(DatabaseInterface):
                 fx_rate,
                 amount_base,
                 tx.maintenanceId,
+                tx.projectId,
             ),
         )
         assert self.conn is not None
@@ -423,7 +465,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=?,currency=?,fxRate=?,amountBase=?,maintenanceId=? WHERE id=?",
+            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,attachmentUrl=?,isPaid=?,currency=?,fxRate=?,amountBase=?,maintenanceId=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 tx.date,
                 tx.amount,
@@ -441,6 +483,7 @@ class SQLiteDatabase(DatabaseInterface):
                 fx_rate,
                 amount_base,
                 tx.maintenanceId,
+                tx.projectId,
                 id,
             ),
         )
@@ -466,6 +509,10 @@ class SQLiteDatabase(DatabaseInterface):
             if key in filters and filters[key] is not None:
                 clauses.append(f"{key} = ?")
                 params.append(filters[key])
+        proj_clause, proj_params = self._project_filter(filters.get("projectId"))
+        if proj_clause:
+            clauses.append(proj_clause)
+            params.extend(proj_params)
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
@@ -474,7 +521,7 @@ class SQLiteDatabase(DatabaseInterface):
     def create_maintenance(self, req: MaintenanceRequest) -> MaintenanceRequest:
         cur = self._cursor()
         cur.execute(
-            "INSERT INTO maintenance (id,propertyId,tenantId,title,description,priority,status,dateReported) VALUES (?,?,?,?,?,?,?,?)",
+            "INSERT INTO maintenance (id,propertyId,tenantId,title,description,priority,status,dateReported,projectId) VALUES (?,?,?,?,?,?,?,?,?)",
             (
                 req.id,
                 req.propertyId,
@@ -484,6 +531,7 @@ class SQLiteDatabase(DatabaseInterface):
                 req.priority,
                 req.status,
                 req.dateReported,
+                req.projectId,
             ),
         )
         assert self.conn is not None
@@ -495,7 +543,7 @@ class SQLiteDatabase(DatabaseInterface):
     ) -> MaintenanceRequest:
         cur = self._cursor()
         cur.execute(
-            "UPDATE maintenance SET propertyId=?,tenantId=?,title=?,description=?,priority=?,status=?,dateReported=? WHERE id=?",
+            "UPDATE maintenance SET propertyId=?,tenantId=?,title=?,description=?,priority=?,status=?,dateReported=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 req.propertyId,
                 req.tenantId,
@@ -504,6 +552,7 @@ class SQLiteDatabase(DatabaseInterface):
                 req.priority,
                 req.status,
                 req.dateReported,
+                req.projectId,
                 id,
             ),
         )
