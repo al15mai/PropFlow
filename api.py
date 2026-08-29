@@ -752,6 +752,73 @@ def list_project_members(id: str, user: User = Depends(get_current_user)):
     return db.list_project_members(id)
 
 
+# --- Project admin (task D1e) --------------------------------------------------
+# Owner-only project mutations behind the Team screen's danger zone. The owner
+# check is per-project ("are you *this* project's owner?"), not the global
+# `require_owner`, so a member who owns a *different* project still gets 403 here.
+
+def _require_project_owner(project_id: str, user: User) -> None:
+    if db.get_project_member_role(project_id, user.id) != "owner":
+        raise HTTPException(status_code=403, detail="Only the project owner can do that")
+
+
+@app.put("/projects/{id}", response_model=Project)
+def update_project(id: str, patch: dict, user: User = Depends(get_current_user)):
+    _require_project_owner(id, user)
+    name = patch.get("name")
+    currency = patch.get("currency")
+    if name is not None and not str(name).strip():
+        raise HTTPException(status_code=422, detail="Project name can't be empty")
+    updated = db.update_project(id, name=str(name).strip() if name is not None else None,
+                               currency=currency)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return updated
+
+
+@app.delete("/projects/{id}", status_code=204)
+def delete_project(id: str, user: User = Depends(get_current_user)):
+    _require_project_owner(id, user)
+    if db.count_owned_projects(user.id) <= 1:
+        raise HTTPException(status_code=409, detail="Can't delete your only project")
+    n = db.project_row_count(id)
+    if n:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Project still has {n} record(s) — move or delete them first",
+        )
+    db.delete_project(id)
+    return
+
+
+@app.delete("/projects/{id}/members/{userId}", status_code=204)
+def remove_project_member(id: str, userId: str, user: User = Depends(get_current_user)):
+    _require_project_owner(id, user)
+    role = db.get_project_member_role(id, userId)
+    if role is None:
+        return  # already not a member — idempotent
+    if role == "owner":
+        raise HTTPException(status_code=409, detail="Can't remove the project owner")
+    db.remove_project_member(id, userId)
+    return
+
+
+@app.post("/projects/{id}/transfer", response_model=Project)
+def transfer_project(id: str, body: dict, user: User = Depends(get_current_user)):
+    _require_project_owner(id, user)
+    target = body.get("userId")
+    if not target:
+        raise HTTPException(status_code=422, detail="userId is required")
+    if target == user.id:
+        raise HTTPException(status_code=409, detail="You already own this project")
+    if db.get_project_member_role(id, target) is None:
+        raise HTTPException(status_code=409, detail="That user isn't a member of this project")
+    db.set_project_owner(id, target)
+    updated = db.get_project(id)
+    assert updated is not None
+    return updated
+
+
 @app.post("/auth/accept-invite", response_model=AuthResponse)
 def accept_invite(body: AcceptInviteRequest):
     invite = db.get_invite_by_token_hash(auth.hash_invite_token(body.token))

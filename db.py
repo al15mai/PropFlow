@@ -955,6 +955,84 @@ class SQLiteDatabase(DatabaseInterface):
     def count_projects(self) -> int:
         return self._cursor().execute("SELECT COUNT(*) FROM projects").fetchone()[0]
 
+    # --- Project admin (task D1e) ---
+
+    def update_project(
+        self, project_id: str, name: Optional[str] = None, currency: Optional[str] = None,
+    ) -> Optional[Project]:
+        """Patch a project's name / currency. Only the fields that are not None
+        are written (COALESCE keeps the rest)."""
+        cur = self._cursor()
+        cur.execute(
+            "UPDATE projects SET name = COALESCE(?, name), currency = COALESCE(?, currency) "
+            "WHERE id = ?",
+            (name, currency, project_id),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+        return self.get_project(project_id)
+
+    def project_row_count(self, project_id: str) -> int:
+        """How many domain rows are stamped with this project id — the guard for
+        `delete_project` (an empty project can be deleted; a populated one can't).
+        NULL-project legacy rows aren't counted: they're shared, not owned."""
+        total = 0
+        for t in ("properties", "tenants", "transactions", "maintenance"):
+            total += self._cursor().execute(
+                f"SELECT COUNT(*) FROM {t} WHERE projectId = ?", (project_id,)
+            ).fetchone()[0]
+        return total
+
+    def delete_project(self, project_id: str) -> None:
+        """Drop a project and its membership rows. Caller must have checked
+        `project_row_count == 0` and that it isn't the owner's last project."""
+        cur = self._cursor()
+        cur.execute("DELETE FROM project_members WHERE projectId = ?", (project_id,))
+        cur.execute("DELETE FROM invites WHERE projectId = ?", (project_id,))
+        cur.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        assert self.conn is not None
+        self.conn.commit()
+
+    def remove_project_member(self, project_id: str, user_id: str) -> None:
+        cur = self._cursor()
+        cur.execute(
+            "DELETE FROM project_members WHERE projectId = ? AND userId = ?",
+            (project_id, user_id),
+        )
+        assert self.conn is not None
+        self.conn.commit()
+
+    def get_project_member_role(self, project_id: str, user_id: str) -> Optional[str]:
+        row = self._cursor().execute(
+            "SELECT role FROM project_members WHERE projectId = ? AND userId = ?",
+            (project_id, user_id),
+        ).fetchone()
+        return row["role"] if row else None
+
+    def set_project_owner(self, project_id: str, new_owner_id: str) -> None:
+        """Transfer ownership: the old owner(s) become 'member', the target
+        becomes 'owner', and `projects.ownerId` follows. The target must already
+        be a member (caller checks)."""
+        cur = self._cursor()
+        cur.execute(
+            "UPDATE project_members SET role = 'member' "
+            "WHERE projectId = ? AND role = 'owner'",
+            (project_id,),
+        )
+        cur.execute(
+            "UPDATE project_members SET role = 'owner' WHERE projectId = ? AND userId = ?",
+            (project_id, new_owner_id),
+        )
+        cur.execute("UPDATE projects SET ownerId = ? WHERE id = ?", (new_owner_id, project_id))
+        assert self.conn is not None
+        self.conn.commit()
+
+    def count_owned_projects(self, user_id: str) -> int:
+        return self._cursor().execute(
+            "SELECT COUNT(*) FROM project_members WHERE userId = ? AND role = 'owner'",
+            (user_id,),
+        ).fetchone()[0]
+
     # --- Invites (task D1) ---
 
     def create_invite(
