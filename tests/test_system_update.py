@@ -204,3 +204,74 @@ def test_run_update_up_to_date_does_not_restart(monkeypatch):
     assert res["status"] == "up_to_date"
     assert restarts == []
     assert "restarting" not in res
+    # backend didn't move → migrations aren't even looked at
+    assert res["migrations"]["status"] == "skipped"
+
+
+# --- D2m: migrations run before the restart on a backend update ---------------
+
+def _backend_moved(monkeypatch):
+    """Make run_git_update report the backend fast-forwarded, frontend current."""
+    calls = {"n": 0}
+
+    def fake(repo_dir, branch):
+        calls["n"] += 1
+        if calls["n"] == 1:  # backend
+            return {"status": "ok", "previous_sha": "old", "new_sha": "new", "changed": True}
+        return {"status": "ok", "previous_sha": "f", "new_sha": "f", "changed": False}
+
+    monkeypatch.setattr(system_update, "run_git_update", fake)
+    monkeypatch.setattr(system_update, "_lockfiles_changed", lambda *a, **k: [])
+
+
+def test_run_update_runs_pending_migrations_then_restarts(monkeypatch):
+    _backend_moved(monkeypatch)
+    monkeypatch.setattr(
+        system_update, "_run_pending_migrations",
+        lambda: {"status": "ok", "applied": ["011_x"], "skipped_manual": [], "backup": "/b"},
+    )
+    restarts: list[int] = []
+    monkeypatch.setattr(system_update, "schedule_self_restart", lambda *a, **k: restarts.append(1))
+
+    res = system_update.run_update()
+    assert res["status"] == "updated"
+    assert res["migrations"]["applied"] == ["011_x"]
+    assert res["restarting"] is True
+    assert restarts == [1]
+
+
+def test_run_update_holds_restart_when_a_migration_fails(monkeypatch):
+    _backend_moved(monkeypatch)
+    monkeypatch.setattr(
+        system_update, "_run_pending_migrations",
+        lambda: {"status": "error", "detail": "migration 011_x failed: boom", "failed": "011_x"},
+    )
+    restarts: list[int] = []
+    monkeypatch.setattr(system_update, "schedule_self_restart", lambda *a, **k: restarts.append(1))
+
+    res = system_update.run_update()
+    assert res["status"] == "migration_failed"
+    assert res["restarting"] is False
+    assert restarts == []  # deliberately NOT restarted onto a schema-mismatched DB
+    assert res["migrations"]["failed"] == "011_x"
+
+
+def test_run_update_skips_migrations_when_only_frontend_moved(monkeypatch):
+    calls = {"n": 0}
+
+    def fake(repo_dir, branch):
+        calls["n"] += 1
+        if calls["n"] == 1:  # backend unchanged
+            return {"status": "ok", "previous_sha": "b", "new_sha": "b", "changed": False}
+        return {"status": "ok", "previous_sha": "old", "new_sha": "new", "changed": True}
+
+    monkeypatch.setattr(system_update, "run_git_update", fake)
+    monkeypatch.setattr(system_update, "_lockfiles_changed", lambda *a, **k: [])
+    monkeypatch.setattr(system_update, "_build_frontend_if_served", lambda: {"status": "skipped"})
+    called = []
+    monkeypatch.setattr(system_update, "_run_pending_migrations", lambda: called.append(1) or {})
+    monkeypatch.setattr(system_update, "schedule_self_restart", lambda *a, **k: None)
+
+    res = system_update.run_update()
+    assert called == []  # backend didn't move → no migration pass
+    assert res["migrations"]["status"] == "skipped"

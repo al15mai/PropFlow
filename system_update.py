@@ -19,7 +19,9 @@ The two repos are nested — `PropFlowUI` (frontend, parent) contains `PropFlow/
 `run_git_update` fetches, refuses to touch a dirty tree (aborts, changes nothing),
 and only ever fast-forwards — it can never discard local work. If a fast-forward
 would pull a changed `uv.lock` / `package-lock.json`, the matching install
-(`uv sync` / `npm ci` + `npm run build`) runs before the restart.
+(`uv sync` / `npm ci` + `npm run build`) runs before the restart. If the backend
+moved, pending DB migrations run (backed up + recorded in `schema_migrations`)
+before the restart too, and a migration failure holds the restart (task D2m).
 
 Everything degrades gracefully: missing `git`, not-a-repo, or a failed command
 leaves each field empty-ish and `available=False` — the version endpoint never
@@ -197,6 +199,43 @@ def _build_frontend_if_served() -> Dict[str, Any]:
     return {"status": "ok"}
 
 
+def _run_pending_migrations() -> Dict[str, Any]:
+    """Run any DB migrations the just-pulled backend code needs (task D2m).
+
+    Delegates to ``migrations_runner.run_pending`` (which backs the DB up first
+    and records each migration in ``schema_migrations``). Never raises — a
+    migration failure comes back as ``status: "error"`` so the caller can hold
+    the restart and surface it.
+
+    ``status`` is ``ok`` (with ``applied`` / ``skipped_manual`` lists) |
+    ``up_to_date`` | ``error`` (with ``detail`` + ``failed`` + ``backup``) |
+    ``unavailable`` (runner not importable).
+    """
+    try:
+        import migrations_runner as mr
+    except Exception as e:  # pragma: no cover - runner missing is not expected in prod
+        return {"status": "unavailable", "detail": str(e)}
+    try:
+        res = mr.run_pending(via="admin/update")
+    except mr.MigrationError as e:
+        # The pre-run backup was already taken inside run_pending.
+        return {
+            "status": "error",
+            "detail": str(e),
+            "failed": getattr(e, "mig_id", None),
+        }
+    except FileNotFoundError as e:
+        return {"status": "unavailable", "detail": str(e)}
+    if res.get("up_to_date"):
+        return {"status": "up_to_date"}
+    return {
+        "status": "ok",
+        "applied": res.get("applied", []),
+        "skipped_manual": res.get("skipped_manual", []),
+        "backup": res.get("backup"),
+    }
+
+
 def run_update(*, restart: bool = True) -> Dict[str, Any]:
     """Update both repos to their tracked branches and (optionally) restart.
 
@@ -209,11 +248,15 @@ def run_update(*, restart: bool = True) -> Dict[str, Any]:
       runs (`uv sync` for the backend, `npm ci` for the frontend). If the
       frontend moved at all and a built bundle is being served, `npm run build`
       runs too.
-    - Restarts (``schedule_self_restart``) only if something actually changed.
+    - If the backend moved, pending DB migrations run (backed up + recorded)
+      **before** the restart — a migration failure holds the restart so the
+      owner sees it (task D2m).
+    - Restarts (``schedule_self_restart``) only if something actually changed and
+      no migration failed.
 
-    Returns ``{status, backend, frontend, installs, restarting}``.
-    ``status`` is ``updated`` | ``up_to_date``; raises nothing here — the caller
-    (api.py) maps a hard backend failure to HTTP 409.
+    Returns ``{status, backend, frontend, installs, migrations, restarting}``.
+    ``status`` is ``updated`` | ``up_to_date`` | ``migration_failed``; raises
+    nothing here — the caller (api.py) maps a hard backend failure to HTTP 409.
     """
     backend = run_git_update(BACKEND_REPO_DIR, BACKEND_BRANCH)
     if backend["status"] != "ok":
@@ -232,12 +275,33 @@ def run_update(*, restart: bool = True) -> Dict[str, Any]:
             installs.append(_run_install(FRONTEND_REPO_DIR, _LOCKFILE_INSTALLS[name]))
         installs.append({"cmd": "npm run build", **_build_frontend_if_served()})
 
+    # Migrations only matter when the backend code moved (a new NNN_*.py may have
+    # arrived). `uv sync` above already ran if the lockfile moved.
+    migrations: Dict[str, Any] = {"status": "skipped"}
+    if backend.get("changed"):
+        migrations = _run_pending_migrations()
+
     changed = bool(backend.get("changed") or frontend_changed)
+
+    if migrations.get("status") == "error":
+        # Code is pulled but the DB migration failed — do NOT restart onto code
+        # that expects a schema the DB doesn't have. The old process keeps
+        # serving; the owner restores the backup / fixes the migration by hand.
+        return {
+            "status": "migration_failed",
+            "backend": backend,
+            "frontend": frontend,
+            "installs": installs,
+            "migrations": migrations,
+            "restarting": False,
+        }
+
     result: Dict[str, Any] = {
         "status": "updated" if changed else "up_to_date",
         "backend": backend,
         "frontend": frontend,
         "installs": installs,
+        "migrations": migrations,
     }
     if changed and restart:
         schedule_self_restart()

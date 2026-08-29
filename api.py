@@ -192,12 +192,20 @@ def admin_restart(user: User = Depends(require_owner)):
 @app.post("/admin/update")
 def admin_update(user: User = Depends(require_owner)):
     """Fast-forward both repos to their tracked branches, run installs if a
-    lockfile moved, then restart if anything changed. 409 (never restarting,
-    nothing changed) if the backend tree is dirty or the pull isn't a
-    fast-forward."""
+    lockfile moved, run pending DB migrations if the backend moved, then restart
+    if anything changed.
+
+    - 409 if the backend tree is dirty or the pull isn't a fast-forward (nothing
+      changed, not restarting).
+    - 500 if a DB migration failed — the code is pulled but the process is
+      deliberately NOT restarted (it would expect a schema the DB doesn't have);
+      `detail.migrations` says which migration and where the pre-run backup is.
+    """
     result = run_update()
     if result.get("status") == "error":
         raise HTTPException(status_code=409, detail=result.get("backend"))
+    if result.get("status") == "migration_failed":
+        raise HTTPException(status_code=500, detail=result)
     return result
 
 
