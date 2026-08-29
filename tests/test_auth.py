@@ -146,6 +146,39 @@ def test_full_invite_flow(client, owner):
     ).status_code == 404
 
 
+def test_project_members_endpoint(client, owner):
+    # after an invite is accepted, both show up on the members list
+    r = client.post(
+        "/auth/invite",
+        json={"email": "mem2@example.com", "name": "Mem Two", "projectId": "proj-main"},
+        headers=owner["headers"],
+    )
+    tok = r.json()["token"]
+    client.post("/auth/accept-invite", json={"token": tok, "password": "mem2pass12"})
+
+    r = client.get("/projects/proj-main/members", headers=owner["headers"])
+    assert r.status_code == 200
+    members = r.json()
+    by_email = {m["email"]: m for m in members}
+    assert by_email["owner@example.com"]["role"] == "owner"
+    assert by_email["mem2@example.com"]["role"] == "member"
+
+
+def test_project_members_requires_membership(client, owner):
+    import api as api_mod
+    outsider = api_mod.db.create_user(
+        id=uuid.uuid4().hex, email="out@example.com", name="Out",
+        password_hash=auth.hash_password("outpass12"), avatar=None,
+        created_at="2026-08-28T00:00:00",
+    )
+    tok = auth.create_access_token(outsider.id, {})
+    assert client.get(
+        "/projects/proj-main/members", headers={"Authorization": f"Bearer {tok}"}
+    ).status_code == 403
+    client.set_token(None)
+    assert client.get("/projects/proj-main/members").status_code == 401
+
+
 def test_invite_rejects_existing_account(client, owner):
     r = client.post(
         "/auth/invite",

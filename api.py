@@ -744,6 +744,14 @@ def revoke_invite(id: str, user: User = Depends(get_current_user)):
     return
 
 
+@app.get("/projects/{id}/members")
+def list_project_members(id: str, user: User = Depends(get_current_user)):
+    """[{id, name, email, role}] — for the Team screen (task D1d). Members only."""
+    if not db.is_project_member(id, user.id):
+        raise HTTPException(status_code=403, detail="Not a member of that project")
+    return db.list_project_members(id)
+
+
 @app.post("/auth/accept-invite", response_model=AuthResponse)
 def accept_invite(body: AcceptInviteRequest):
     invite = db.get_invite_by_token_hash(auth.hash_invite_token(body.token))

@@ -924,6 +924,17 @@ class SQLiteDatabase(DatabaseInterface):
             (project_id, user_id),
         ).fetchone() is not None
 
+    def list_project_members(self, project_id: str) -> List[Dict[str, Any]]:
+        """[{id, name, email, role}] for the Team screen (task D1d)."""
+        rows = self._cursor().execute(
+            "SELECT u.id, u.name, u.email, m.role "
+            "FROM project_members m JOIN users u ON u.id = m.userId "
+            "WHERE m.projectId = ? "
+            "ORDER BY (m.role = 'owner') DESC, u.name",
+            (project_id,),
+        ).fetchall()
+        return [{"id": r["id"], "name": r["name"], "email": r["email"], "role": r["role"]} for r in rows]
+
     def user_owns_any_project(self, user_id: str) -> bool:
         """True if this user is the 'owner' of at least one project — the proxy
         for 'is the landlord' used by owner-gated routes (task D1c)."""
