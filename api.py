@@ -879,6 +879,9 @@ _INVOICE_PROMPT = (
 def _ai_error(exc: Exception):
     from llm import LLMNotLoggedIn, LLMRateLimited, LLMUnavailable
 
+    # One line in the server log so "AI unavailable" in the UI is diagnosable
+    # without attaching a debugger (E5c acceptance criterion).
+    print(f"[ai] request failed: {type(exc).__name__}: {exc}")
     if isinstance(exc, LLMNotLoggedIn):
         return HTTPException(status_code=503, detail="ai_not_logged_in")
     if isinstance(exc, LLMRateLimited):
