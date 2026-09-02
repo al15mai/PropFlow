@@ -1101,6 +1101,51 @@ def tenant_bootstrap(tenant: Tenant = Depends(get_current_tenant)):
     }
 
 
+def _stamp_for_tenant(obj, tenant: Tenant) -> None:
+    """Force a tenant-submitted row onto this tenant + their property + project,
+    ignoring whatever the client sent — a tenant can only ever write their own."""
+    obj.tenantId = tenant.id
+    obj.projectId = tenant.projectId
+    if hasattr(obj, "propertyId"):
+        obj.propertyId = tenant.propertyId
+
+
+@app.post("/tenant/maintenance", response_model=MaintenanceRequest)
+def tenant_create_maintenance(req: MaintenanceRequest, tenant: Tenant = Depends(get_current_tenant)):
+    """A tenant files a maintenance request for their own unit (task D1f / E4)."""
+    _stamp_for_tenant(req, tenant)
+    db.create_maintenance(req)
+    return req
+
+
+@app.put("/tenant/maintenance/{id}", response_model=MaintenanceRequest)
+def tenant_update_maintenance(id: str, req: MaintenanceRequest, tenant: Tenant = Depends(get_current_tenant)):
+    existing = db.get_maintenance(id)
+    if existing is None or existing.tenantId != tenant.id:
+        raise HTTPException(status_code=404, detail="Maintenance request not found")
+    _stamp_for_tenant(req, tenant)
+    db.update_maintenance(id, req)
+    return req
+
+
+@app.delete("/tenant/maintenance/{id}", status_code=204)
+def tenant_delete_maintenance(id: str, tenant: Tenant = Depends(get_current_tenant)):
+    existing = db.get_maintenance(id)
+    if existing is not None and existing.tenantId == tenant.id:
+        db.delete_maintenance(id)
+    return
+
+
+@app.post("/tenant/payments", response_model=Transaction)
+def tenant_record_payment(tx: Transaction, tenant: Tenant = Depends(get_current_tenant)):
+    """A tenant records a rent/bill payment they made (task D1f / E4). Forced to
+    Income, their own tenantId/property/project, regardless of the payload."""
+    tx.type = "Income"
+    _stamp_for_tenant(tx, tenant)
+    db.create_transaction(tx)
+    return tx
+
+
 # --- Browser-LLM automation (task E5) -------------------------------------
 #
 # Thin wrappers over `llm.providers.run_text(...)`. The heavy lifting (one

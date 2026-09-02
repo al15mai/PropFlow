@@ -204,6 +204,74 @@ def test_tenant_me_refreshes_token(client):
     assert r.json()["token"]
 
 
+# --- tenant-portal writes (task D1f / E4) ----------------------------------
+
+def _tenant_token(client, email, pw):
+    return client.post("/auth/tenant-login",
+                       json={"identifier": email, "password": pw}).json()["token"]
+
+
+def test_tenant_files_own_maintenance_request(client):
+    body, pw = _make_tenant(client, email="kim@x.co", propertyId="prop-K")
+    h = {"Authorization": f"Bearer {_tenant_token(client, 'kim@x.co', pw)}"}
+    r = client.post("/tenant/maintenance", json={
+        "id": uuid.uuid4().hex[:9], "propertyId": "anything-ignored",
+        "tenantId": "also-ignored", "title": "Leaky tap", "description": "drip drip",
+        "priority": "Medium", "status": "Open", "dateReported": "2026-03-01",
+    }, headers=h)
+    assert r.status_code == 200, r.text
+    row = r.json()
+    # server forces it onto this tenant + their property
+    assert row["tenantId"] == body["id"]
+    assert row["propertyId"] == "prop-K"
+    # and it shows up in their bootstrap
+    b = client.get("/tenant/bootstrap", headers=h).json()
+    assert [m["title"] for m in b["maintenance"]] == ["Leaky tap"]
+
+
+def test_tenant_cannot_touch_another_tenants_maintenance(client):
+    a, a_pw = _make_tenant(client, email="a2@x.co", phone="0700000030")
+    b, b_pw = _make_tenant(client, email="b2@x.co", phone="0700000031")
+    ha = {"Authorization": f"Bearer {_tenant_token(client, 'a2@x.co', a_pw)}"}
+    hb = {"Authorization": f"Bearer {_tenant_token(client, 'b2@x.co', b_pw)}"}
+    made = client.post("/tenant/maintenance", json={
+        "id": uuid.uuid4().hex[:9], "propertyId": "p", "title": "A's issue",
+        "description": "x", "priority": "Low", "status": "Open", "dateReported": "2026-03-01",
+    }, headers=ha).json()
+    # B can't update or delete A's request
+    assert client.put(f"/tenant/maintenance/{made['id']}", json={**made, "title": "hijacked"},
+                      headers=hb).status_code == 404
+    assert client.delete(f"/tenant/maintenance/{made['id']}", headers=hb).status_code == 204  # idempotent no-op
+    # A's request is untouched
+    b = client.get("/tenant/bootstrap", headers=ha).json()
+    assert [m["title"] for m in b["maintenance"]] == ["A's issue"]
+
+
+def test_tenant_records_own_payment_forced_income(client):
+    body, pw = _make_tenant(client, email="lee@x.co")
+    h = {"Authorization": f"Bearer {_tenant_token(client, 'lee@x.co', pw)}"}
+    r = client.post("/tenant/payments", json={
+        "id": uuid.uuid4().hex[:9], "date": "2026-03-05", "amount": 750.0,
+        "type": "Expense",  # ignored — forced to Income
+        "paymentMethod": "Transfer", "tenantId": "ignored",
+    }, headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["type"] == "Income"
+    assert r.json()["tenantId"] == body["id"]
+
+
+def test_tenant_write_endpoints_reject_landlord_token(client):
+    # the owner's default token is a user token — 401 on /tenant/*
+    assert client.post("/tenant/maintenance", json={
+        "id": "x", "propertyId": "p", "title": "t", "description": "d",
+        "priority": "Low", "status": "Open", "dateReported": "2026-01-01",
+    }).status_code == 401
+    assert client.post("/tenant/payments", json={
+        "id": "x", "date": "2026-01-01", "amount": 1.0, "type": "Income",
+        "paymentMethod": "Cash",
+    }).status_code == 401
+
+
 # --- account-holder listing (feeds D9) --------------------------------------
 
 def test_list_account_holder_tenants(client):
