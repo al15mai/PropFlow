@@ -200,6 +200,23 @@ def _tenant_owns_property(tenant, property_id: Optional[str]) -> bool:
     return bool(property_id) and property_id == tenant.propertyId
 
 
+# A few read-only routes serve BOTH a landlord and a signed-in tenant (the tenant
+# portal reuses `DocumentManager`, task D1f). This resolves whichever token was
+# sent; the route then scopes a tenant caller to their own rows.
+def get_user_or_tenant(authorization: Optional[str] = Header(default=None)):
+    claims = _claims_from_header(authorization)
+    tenant_id = auth.tenant_id_from_claims(claims)
+    if tenant_id is not None:
+        tenant = db.get_tenant(tenant_id)
+        if tenant is None:
+            raise HTTPException(status_code=401, detail="Unknown tenant")
+        return ("tenant", tenant)
+    user = db.get_user(claims.get("sub", ""))
+    if user is None:
+        raise HTTPException(status_code=401, detail="Unknown user")
+    return ("user", user)
+
+
 # Health endpoint
 @app.get("/health")
 def health():
@@ -570,15 +587,40 @@ def _assert_tx_in_scope(transaction_id: Optional[str], user: User) -> None:
         _assert_owns_row(tx.projectId, user, "That transaction")
 
 
+def _assert_doc_write_in_scope(transaction_id: Optional[str], principal) -> None:
+    """Create/update/delete of a document. A landlord is scoped by project; a
+    tenant may only touch a document on one of their own transactions (a
+    transaction-less `pending` doc is not something a tenant creates)."""
+    kind, who = principal
+    if kind == "tenant":
+        if not transaction_id:
+            raise HTTPException(status_code=403, detail="Attach the document to one of your transactions")
+        tx = db.get_transaction(transaction_id)
+        if tx is None or tx.tenantId != who.id:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+        return
+    _assert_tx_in_scope(transaction_id, who)
+
+
 @app.get("/documents")
 def list_documents(
     transactionId: Optional[str] = None,
     tenantId: Optional[str] = None,
     pending: Optional[bool] = None,
-    user: User = Depends(get_current_user),
+    principal=Depends(get_user_or_tenant),
 ):
+    kind, who = principal
+    if kind == "tenant":
+        # A tenant only ever sees documents on their own transactions. The SQL
+        # `tenantId` filter enforces that; a `transactionId` narrows within it,
+        # and `pending` (transaction-less) docs are never a tenant's.
+        if transactionId is not None:
+            tx = db.get_transaction(transactionId)
+            if tx is None or tx.tenantId != who.id:
+                return []
+        return [_doc_response(d) for d in db.list_documents(transactionId, who.id, None)]
     if transactionId:
-        _assert_tx_in_scope(transactionId, user)
+        _assert_tx_in_scope(transactionId, who)
     return [_doc_response(d) for d in db.list_documents(transactionId, tenantId, pending)]
 
 
@@ -590,9 +632,9 @@ async def create_document(
     kind: str = Form("other"),
     note: str = Form(""),
     filename: Optional[str] = Form(None),
-    user: User = Depends(get_current_user),
+    principal=Depends(get_user_or_tenant),
 ):
-    _assert_tx_in_scope(transactionId or None, user)
+    _assert_doc_write_in_scope(transactionId or None, principal)
     if kind not in ("invoice", "receipt", "bill", "other"):
         kind = "other"
     doc_id = uuid.uuid4().hex
@@ -642,11 +684,17 @@ async def create_document(
 
 
 @app.get("/documents/{id}/file")
-def get_document_file(id: str, user: User = Depends(get_current_user)):
+def get_document_file(id: str, principal=Depends(get_user_or_tenant)):
     doc = db.get_document(id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    _assert_tx_in_scope(doc.transactionId, user)
+    kind, who = principal
+    if kind == "tenant":
+        tx = db.get_transaction(doc.transactionId) if doc.transactionId else None
+        if tx is None or tx.tenantId != who.id:
+            raise HTTPException(status_code=404, detail="Document not found")
+    else:
+        _assert_tx_in_scope(doc.transactionId, who)
     if doc.storage != "file" or not doc.path:
         raise HTTPException(status_code=409, detail="This document is a link, not a stored file")
     fp = _uploads_dir() / doc.path
@@ -656,13 +704,13 @@ def get_document_file(id: str, user: User = Depends(get_current_user)):
 
 
 @app.put("/documents/{id}", response_model=Document)
-def update_document(id: str, patch: dict, user: User = Depends(get_current_user)):
+def update_document(id: str, patch: dict, principal=Depends(get_user_or_tenant)):
     existing = db.get_document(id)
     if existing is None:
         raise HTTPException(status_code=404, detail="Document not found")
-    _assert_tx_in_scope(existing.transactionId, user)
+    _assert_doc_write_in_scope(existing.transactionId, principal)
     if patch.get("transactionId"):
-        _assert_tx_in_scope(patch["transactionId"], user)
+        _assert_doc_write_in_scope(patch["transactionId"], principal)
     try:
         return db.update_document(id, **patch)
     except KeyError:
@@ -670,10 +718,10 @@ def update_document(id: str, patch: dict, user: User = Depends(get_current_user)
 
 
 @app.delete("/documents/{id}", status_code=204)
-def delete_document(id: str, user: User = Depends(get_current_user)):
+def delete_document(id: str, principal=Depends(get_user_or_tenant)):
     existing = db.get_document(id)
     if existing is not None:
-        _assert_tx_in_scope(existing.transactionId, user)
+        _assert_doc_write_in_scope(existing.transactionId, principal)
     doc = db.delete_document(id)
     if doc and doc.storage == "file" and doc.path:
         (_uploads_dir() / doc.path).unlink(missing_ok=True)

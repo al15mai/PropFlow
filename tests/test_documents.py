@@ -185,3 +185,66 @@ def test_link_pending_then_delete(client):
     assert client.get("/documents", params={"pending": True}).json() == []
     assert client.delete(f"/documents/{pid}").status_code == 204
     assert client.get("/documents", params={"transactionId": "tx9"}).json() == []
+
+
+# --- D1f: a signed-in tenant reads/attaches documents on their own tx ---------
+
+def _tenant_with_tx(client, *, email="tdoc@x.co", amount=100.0):
+    """Create a tenant + one Income tx of theirs; return (tenant_id, token, tx_id)."""
+    import uuid
+    t = client.post("/tenants", json={
+        "id": uuid.uuid4().hex[:9], "propertyId": "prop-T", "name": "T Doc",
+        "email": email, "phone": "0700100200", "leaseStart": "2026-01-01",
+        "leaseEnd": "2026-12-31", "deposit": 0.0, "status": "Active",
+    }).json()
+    pw = t["initialPassword"]
+    tx = client.post("/transactions", json={
+        "id": uuid.uuid4().hex[:9], "date": "2026-02-01", "amount": amount,
+        "type": "Income", "paymentMethod": "Transfer", "tenantId": t["id"],
+    }).json()
+    token = client.post("/auth/tenant-login",
+                        json={"identifier": email, "password": pw}).json()["token"]
+    return t["id"], token, tx["id"]
+
+
+def test_tenant_lists_and_reads_documents_on_own_transaction(client):
+    tid, token, tx_id = _tenant_with_tx(client)
+    h = {"Authorization": f"Bearer {token}"}
+    # landlord attaches a receipt to the tenant's payment
+    made = client.post("/documents", files={"file": ("r.pdf", io.BytesIO(b"%PDF-1.4 x"), "application/pdf")},
+                       data={"transactionId": tx_id, "kind": "receipt"}).json()
+
+    # tenant can list it (client-sent tenantId is ignored — scoped to the caller)
+    got = client.get("/documents", params={"tenantId": "someone-else"}, headers=h).json()
+    assert [d["id"] for d in got] == [made["id"]]
+    # and stream the file
+    f = client.get(made["fileUrl"], headers=h)
+    assert f.status_code == 200 and f.content == b"%PDF-1.4 x"
+
+
+def test_tenant_cannot_read_another_tenants_documents(client):
+    _, token_a, _ = _tenant_with_tx(client, email="a-doc@x.co")
+    _, _, tx_b = _tenant_with_tx(client, email="b-doc@x.co")
+    ha = {"Authorization": f"Bearer {token_a}"}
+    doc_b = client.post("/documents", data={"url": "http://x/b-invoice", "transactionId": tx_b}).json()
+    # A asking for B's transaction -> empty, and B's file -> 404
+    assert client.get("/documents", params={"transactionId": tx_b}, headers=ha).json() == []
+    assert client.get(f"/documents/{doc_b['id']}/file", headers=ha).status_code in (404, 409)
+
+
+def test_tenant_attaches_and_removes_own_document(client):
+    tid, token, tx_id = _tenant_with_tx(client, email="c-doc@x.co")
+    h = {"Authorization": f"Bearer {token}"}
+    made = client.post("/documents", files={"file": ("c.pdf", io.BytesIO(b"%PDF-1.4 c"), "application/pdf")},
+                       data={"transactionId": tx_id, "kind": "receipt"}, headers=h)
+    assert made.status_code == 201, made.text
+    did = made.json()["id"]
+    assert client.put(f"/documents/{did}", json={"kind": "bill"}, headers=h).status_code == 200
+    assert client.delete(f"/documents/{did}", headers=h).status_code == 204
+
+
+def test_tenant_cannot_attach_a_pending_document(client):
+    _, token, _ = _tenant_with_tx(client, email="d-doc@x.co")
+    h = {"Authorization": f"Bearer {token}"}
+    r = client.post("/documents", data={"url": "http://x/loose"}, headers=h)
+    assert r.status_code == 403
