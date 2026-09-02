@@ -218,6 +218,37 @@ def test_list_account_holder_tenants(client):
     assert "no-login" not in ids
 
 
+def test_account_holders_route_lists_only_login_tenants(client):
+    """GET /projects/{id}/account-holders — the D9 endpoint."""
+    a, _ = _make_tenant(client, name="Signs In", email="si@x.co", phone="0700000011")
+    import api as api_mod
+    api_mod.db.create_tenant(_bare_tenant("nl-2", "No Login 2", "nl2@x.co"))
+
+    r = client.get(f"/projects/{client.owner_project_id}/account-holders")
+    assert r.status_code == 200, r.text
+    rows = r.json()
+    ids = {h["id"] for h in rows}
+    assert a["id"] in ids
+    assert "nl-2" not in ids
+    row = next(h for h in rows if h["id"] == a["id"])
+    assert row["mustReset"] is True
+    assert set(row) == {"id", "name", "email", "phone", "mustReset"}
+
+
+def test_account_holders_route_denies_non_member(client):
+    _make_tenant(client, email="member-check@x.co", phone="0700000012")
+    _, other_pid, other_tok = client.seed_user("outsider@x.co", project_name="Other")
+    import api as api_mod
+    c2 = _client_with_token(api_mod, other_tok)
+    # outsider asks for the owner's project -> 403
+    assert c2.get(f"/projects/{client.owner_project_id}/account-holders").status_code == 403
+
+
+def _client_with_token(api_mod, token):
+    from _asgi import ASGIClient
+    return ASGIClient(api_mod.app, headers={"Authorization": f"Bearer {token}"})
+
+
 def _bare_tenant(tid, name, email):
     from models import Tenant
     return Tenant(

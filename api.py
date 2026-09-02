@@ -83,6 +83,7 @@ from models import (
     TenantAuthResponse,
     TenantPasswordReset,
     TenantCreateResponse,
+    AccountHolder,
 )
 
 from db import SQLiteDatabase
@@ -910,6 +911,16 @@ def list_project_members(id: str, user: User = Depends(get_current_user)):
     if not db.is_project_member(id, user.id):
         raise HTTPException(status_code=403, detail="Not a member of that project")
     return db.list_project_members(id)
+
+
+@app.get("/projects/{id}/account-holders", response_model=List[AccountHolder])
+def list_project_account_holders(id: str, user: User = Depends(get_current_user)):
+    """Tenants of this project that have a login (task D9) — so the landlord can
+    see who can sign in and reset a password. Project members only; a member of
+    another project gets 403."""
+    if not db.is_project_member(id, user.id):
+        raise HTTPException(status_code=403, detail="Not a member of that project")
+    return db.list_account_holder_tenants(id)
 
 
 # --- Project admin (task D1e) --------------------------------------------------

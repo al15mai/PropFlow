@@ -291,6 +291,16 @@ class TenantPasswordReset(BaseModel):
     password: str
 
 
+class AccountHolder(BaseModel):
+    """A tenant that can sign in, for the landlord's "who has an account" view
+    (task D9). `mustReset` = issued a password but never changed it."""
+    id: str
+    name: str
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    mustReset: bool = False
+
+
 class TenantCreateResponse(Tenant):
     """`POST /tenants` returns the tenant PLUS the one-time generated password so
     the landlord can hand it over. `initialPassword` is never persisted."""
