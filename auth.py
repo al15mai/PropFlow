@@ -15,6 +15,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import secrets
 import sys
 import time
 from typing import Any, Optional
@@ -26,6 +27,10 @@ JWT_ALG = "HS256"
 ACCESS_TOKEN_TTL = 7 * 24 * 3600  # seconds
 
 _DEV_SECRET = "dev-only-insecure-change-me"
+
+# Tenant sub-claims are prefixed so a tenant token can never be mistaken for a
+# landlord/user token (and vice-versa) even if the ids collide.
+TENANT_SUB_PREFIX = "tenant:"
 
 
 def _secret() -> str:
@@ -62,6 +67,18 @@ def verify_password(password: str, hashed: str) -> bool:
         return False
 
 
+# Ambiguity-free alphabet — no 0/O/1/l/I — so a password read aloud or copied by
+# hand doesn't get fat-fingered (task D1f, tenant passwords are handed over
+# verbally / on paper).
+_PW_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789abcdefghijkmnpqrstuvwxyz"
+
+
+def generate_password(length: int = 10) -> str:
+    """A random password for a freshly created / reset tenant account. Returned
+    to the landlord exactly once; only its bcrypt hash is ever stored."""
+    return "".join(secrets.choice(_PW_ALPHABET) for _ in range(length))
+
+
 # --- tokens ---------------------------------------------------------------
 
 def create_access_token(sub: str, extra: Optional[dict[str, Any]] = None) -> str:
@@ -72,9 +89,27 @@ def create_access_token(sub: str, extra: Optional[dict[str, Any]] = None) -> str
     return jwt.encode(payload, _secret(), algorithm=JWT_ALG)
 
 
+def create_tenant_token(tenant_id: str, extra: Optional[dict[str, Any]] = None) -> str:
+    """A tenant access token: `sub = "tenant:<id>"`, `scope = "tenant"` (task
+    D1f). `api.py::get_current_tenant` is the only thing that accepts it; every
+    landlord route rejects it because `db.get_user("tenant:<id>")` is None."""
+    payload = {"scope": "tenant"}
+    if extra:
+        payload.update(extra)
+    return create_access_token(f"{TENANT_SUB_PREFIX}{tenant_id}", payload)
+
+
 def decode_token(token: str) -> dict[str, Any]:
     """Return the claims, or raise `jwt.InvalidTokenError` (incl. expiry)."""
     return jwt.decode(token, _secret(), algorithms=[JWT_ALG])
+
+
+def tenant_id_from_claims(claims: dict[str, Any]) -> Optional[str]:
+    """The tenant id if these are tenant-token claims, else None."""
+    sub = claims.get("sub", "")
+    if claims.get("scope") == "tenant" and sub.startswith(TENANT_SUB_PREFIX):
+        return sub[len(TENANT_SUB_PREFIX):]
+    return None
 
 
 # --- invite tokens ------------------------------------------------------------
@@ -86,3 +121,24 @@ def new_invite_token() -> str:
 
 def hash_invite_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+# --- phone normalization (tenant login by phone, task D1f) -------------------
+
+def normalize_phone(raw: str) -> str:
+    """Reduce a Romanian phone number to a canonical form for matching:
+    strip spaces / dashes / parens, and fold the `+40` / `0040` / leading-`0`
+    prefixes to a bare national number. `+40 712 345 678`, `0712345678` and
+    `0040712345678` all normalize to `712345678`. Non-RO numbers just lose their
+    separators. Empty in -> empty out."""
+    if not raw:
+        return ""
+    digits = "".join(ch for ch in raw if ch.isdigit() or ch == "+")
+    digits = digits.replace("+", "")
+    if digits.startswith("0040"):
+        digits = digits[4:]
+    elif digits.startswith("40") and len(digits) > 9:
+        digits = digits[2:]
+    if digits.startswith("0"):
+        digits = digits[1:]
+    return digits

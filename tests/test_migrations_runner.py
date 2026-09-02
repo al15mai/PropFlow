@@ -70,8 +70,11 @@ def test_baseline_records_without_running(fresh_db):
 
 def test_baseline_through_caps_at_number(fresh_db):
     mr.baseline(fresh_db, through=9)
-    still_pending = [m.id for m in mr.pending(fresh_db)]
-    assert still_pending == ["010_stamp_legacy_project"]
+    still_pending = {m.id for m in mr.pending(fresh_db)}
+    # Everything <= 009 is recorded; 010 and anything added later stays pending.
+    assert "010_stamp_legacy_project" in still_pending
+    assert all(m.number > 9 for m in mr.pending(fresh_db))
+    assert not any(m.number <= 9 for m in mr.pending(fresh_db))
 
 
 def test_baseline_is_idempotent(fresh_db):

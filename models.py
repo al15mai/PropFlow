@@ -41,6 +41,12 @@ class Tenant(BaseModel):
     rentDueDay: Optional[int] = None
     # Workspace this belongs to (task D4b). Null = legacy / shared across projects.
     projectId: Optional[str] = None
+    # Tenant login (task D1f). `hasLogin` is a read-only convenience the API fills
+    # in (true once a password hash exists); `mustReset` forces a password change
+    # on first sign-in. The password hash itself NEVER rides on this model — it
+    # lives only in `tenants.passwordHash` and is read by `db.get_tenant_auth*`.
+    hasLogin: Optional[bool] = None
+    mustReset: Optional[bool] = None
 
     class Config:
         extra = "ignore"
@@ -254,3 +260,38 @@ class AuthResponse(BaseModel):
     token: str
     user: User
     projects: List[Project] = []
+
+
+# --- Tenant authentication (task D1f) ---------------------------------------
+
+class TenantLoginRequest(BaseModel):
+    """Tenant sign-in: `identifier` is matched against the tenant's email OR
+    phone (phone is normalized — see `auth.normalize_phone`)."""
+    identifier: str
+    password: str
+
+
+class TenantChangePasswordRequest(BaseModel):
+    currentPassword: str
+    newPassword: str
+
+
+class TenantAuthResponse(BaseModel):
+    """What a tenant login / `/auth/me` (tenant token) returns. Deliberately
+    minimal — the tenant's full record comes from `GET /tenants` (scoped)."""
+    token: str
+    tenant: Tenant
+    mustReset: bool = False
+
+
+class TenantPasswordReset(BaseModel):
+    """The one-time plaintext handed back to the landlord after creating a tenant
+    or resetting its password. Never stored, never logged."""
+    tenantId: str
+    password: str
+
+
+class TenantCreateResponse(Tenant):
+    """`POST /tenants` returns the tenant PLUS the one-time generated password so
+    the landlord can hand it over. `initialPassword` is never persisted."""
+    initialPassword: str

@@ -100,6 +100,77 @@ def test_post_without_file_or_url_is_422(client):
     assert client.post("/documents", data={"kind": "other"}).status_code == 422
 
 
+# --- D8: an invoice attached by URL is downloaded, not just linked -----------
+
+class _FakeResp:
+    def __init__(self, content: bytes, content_type: str, headers: dict | None = None):
+        self.content = content
+        self.headers = {"content-type": content_type, **(headers or {})}
+
+    def raise_for_status(self):  # noqa: D401
+        pass
+
+
+class _FakeAsyncClient:
+    """Stands in for httpx.AsyncClient so the download path has no real network."""
+    _resp: _FakeResp | Exception = _FakeResp(b"%PDF-1.4 downloaded", "application/pdf")
+
+    def __init__(self, *a, **kw):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        pass
+
+    async def get(self, url, headers=None):
+        if isinstance(self._resp, Exception):
+            raise self._resp
+        return self._resp
+
+
+@pytest.fixture
+def fake_download(monkeypatch):
+    import httpx
+
+    monkeypatch.setattr("api._url_host_is_public", lambda host: True)
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+    return _FakeAsyncClient
+
+
+def test_add_by_url_downloads_as_file(client, fake_download):
+    fake_download._resp = _FakeResp(b"%PDF-1.4 downloaded", "application/pdf")
+    r = client.post("/documents", data={
+        "url": "https://vendor.example/invoice/42.pdf",
+        "transactionId": "tx1", "kind": "invoice",
+    })
+    assert r.status_code == 201, r.text
+    body = r.json()
+    assert body["storage"] == "file"           # downloaded, not a bare link
+    assert body["url"] == "https://vendor.example/invoice/42.pdf"  # provenance kept
+    assert body["size"] == len(b"%PDF-1.4 downloaded")
+    assert body["fileUrl"] == f"/documents/{body['id']}/file"
+    # and it streams back + is extractable-shaped (a real file on disk)
+    f = client.get(body["fileUrl"])
+    assert f.status_code == 200 and f.content == b"%PDF-1.4 downloaded"
+
+
+def test_add_by_url_falls_back_to_link_on_fetch_error(client, fake_download):
+    fake_download._resp = RuntimeError("boom")
+    r = client.post("/documents", data={"url": "https://vendor.example/x.pdf"})
+    assert r.status_code == 201
+    body = r.json()
+    assert body["storage"] == "link"
+    assert body.get("downloadFailed") is True
+
+
+def test_add_by_url_falls_back_to_link_for_non_document_content(client, fake_download):
+    fake_download._resp = _FakeResp(b"<html>not a pdf</html>", "text/html")
+    body = client.post("/documents", data={"url": "https://vendor.example/page"}).json()
+    assert body["storage"] == "link"
+
+
 def test_list_filter_by_transaction(client):
     client.post("/documents", data={"url": "http://x/a", "transactionId": "tx-A"})
     client.post("/documents", data={"url": "http://x/b", "transactionId": "tx-B"})

@@ -78,6 +78,11 @@ from models import (
     CreateInviteRequest,
     AcceptInviteRequest,
     AuthResponse,
+    TenantLoginRequest,
+    TenantChangePasswordRequest,
+    TenantAuthResponse,
+    TenantPasswordReset,
+    TenantCreateResponse,
 )
 
 from db import SQLiteDatabase
@@ -162,6 +167,36 @@ def _assert_owns_row(row_project_id: Optional[str], user: User, what: str) -> No
     legacy) or belongs to one of the caller's projects."""
     if row_project_id is not None and row_project_id not in _visible_project_ids(user):
         raise HTTPException(status_code=403, detail=f"{what} belongs to another workspace")
+
+
+# --- Tenant auth guard (task D1f) --------------------------------------------
+# A `scope=tenant` token identifies a row in `tenants`, not `users`. It's only
+# accepted by routes that explicitly `Depends(get_current_tenant)`; every
+# landlord route uses `get_current_user`, which rejects it (no matching user).
+
+def _claims_from_header(authorization: Optional[str]) -> dict:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    token = authorization.split(" ", 1)[1].strip()
+    try:
+        return auth.decode_token(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+
+def get_current_tenant(authorization: Optional[str] = Header(default=None)):
+    claims = _claims_from_header(authorization)
+    tenant_id = auth.tenant_id_from_claims(claims)
+    if tenant_id is None:
+        raise HTTPException(status_code=401, detail="Not a tenant token")
+    tenant = db.get_tenant(tenant_id)
+    if tenant is None:
+        raise HTTPException(status_code=401, detail="Unknown tenant")
+    return tenant
+
+
+def _tenant_owns_property(tenant, property_id: Optional[str]) -> bool:
+    return bool(property_id) and property_id == tenant.propertyId
 
 
 # Health endpoint
@@ -260,11 +295,18 @@ def list_tenants(
     )
 
 
-@app.post("/tenants", response_model=Tenant)
+@app.post("/tenants", response_model=TenantCreateResponse)
 def create_tenant(t: Tenant, user: User = Depends(get_current_user)):
     t.projectId = _resolve_project(t.projectId, user)
     db.create_tenant(t)
-    return t
+    # Every new tenant gets a login straight away (task D1f): a random password,
+    # forced-reset on first sign-in, returned here ONCE for the landlord to pass
+    # on. Only the hash is stored.
+    pw = auth.generate_password()
+    db.set_tenant_password(t.id, auth.hash_password(pw), must_reset=True)
+    created = db.get_tenant(t.id)
+    assert created is not None
+    return TenantCreateResponse(**created.model_dump(), initialPassword=pw)
 
 
 @app.put("/tenants/{id}", response_model=Tenant)
@@ -275,7 +317,7 @@ def update_tenant(id: str, t: Tenant, user: User = Depends(get_current_user)):
     _assert_owns_row(existing.projectId, user, "Tenant")
     _assert_owns_row(t.projectId, user, "Tenant")
     db.update_tenant(id, t)
-    return t
+    return db.get_tenant(id) or t
 
 
 @app.delete("/tenants/{id}", status_code=204)
@@ -400,6 +442,20 @@ def list_alerts(user: User = Depends(get_current_user)):
 
 
 # --- Settings ---
+@app.get("/settings", response_model=LandlordSettings)
+def get_settings(user: User = Depends(get_current_user)):
+    """The landlord-settings row. Never saved yet -> blanks (not a dummy
+    profile), so the Settings form shows an empty form on first run rather
+    than fake data."""
+    s = db.get_settings()
+    if s is not None:
+        return s
+    return LandlordSettings(
+        displayName="", email=user.email or "", phone="",
+        companyName="", currency="RON", language="ro",
+    )
+
+
 @app.post("/settings", response_model=LandlordSettings)
 def save_settings(s: LandlordSettings, user: User = Depends(require_owner)):
     db.save_settings(s)
@@ -414,6 +470,85 @@ _EXT_BY_MIME = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+
+# An invoice attached by URL is downloaded so it behaves like an upload —
+# previewable + extractable (task D8). Cap + timeout keep a hostile link cheap.
+_URL_DOC_MAX_BYTES = 20 * 1024 * 1024
+_URL_DOC_TIMEOUT_S = 15
+_URL_DOC_OK_MIME = ("application/pdf", "image/png", "image/jpeg", "image/webp", "image/gif")
+
+
+def _url_host_is_public(host: str) -> bool:
+    """SSRF guard: reject links that resolve to loopback / private / link-local
+    ranges. Only used for the server-side invoice download."""
+    import ipaddress
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    for *_, sockaddr in infos:
+        try:
+            ip = ipaddress.ip_address(sockaddr[0])
+        except ValueError:
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    return True
+
+
+async def _download_url_as_file(url: str, doc_id: str) -> Optional[dict]:
+    """Try to fetch `url` and store it under the uploads dir like an upload.
+    Returns dict(filename, mime, size, path, sha256) on success, or None to let
+    the caller fall back to storing a bare link."""
+    from urllib.parse import urlparse, unquote
+
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    if not _url_host_is_public(parsed.hostname):
+        return None
+
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(follow_redirects=True, timeout=_URL_DOC_TIMEOUT_S) as client:
+            resp = await client.get(url, headers={"User-Agent": "PropFlow/1.0"})
+        resp.raise_for_status()
+    except Exception:
+        return None
+
+    data = resp.content
+    if not data or len(data) > _URL_DOC_MAX_BYTES:
+        return None
+
+    mime = (resp.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if mime not in _URL_DOC_OK_MIME:
+        # sniff a PDF even when the server mislabels it
+        if data[:5] == b"%PDF-":
+            mime = "application/pdf"
+        else:
+            return None
+
+    cd = resp.headers.get("content-disposition", "")
+    name = None
+    if "filename=" in cd:
+        name = cd.split("filename=", 1)[1].strip().strip('"') or None
+    if not name:
+        name = unquote(parsed.path.rsplit("/", 1)[-1]) or "download"
+    ext = Path(name).suffix or _EXT_BY_MIME.get(mime, "")
+    if not Path(name).suffix and ext:
+        name = f"{name}{ext}"
+    rel = f"{doc_id}{ext}"
+    (_uploads_dir() / rel).write_bytes(data)
+    return {
+        "filename": name,
+        "mime": mime,
+        "size": len(data),
+        "path": rel,
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
 
 
 def _doc_response(doc: Document) -> dict:
@@ -476,16 +611,33 @@ async def create_document(
             note=note, createdAt=created,
         )
     elif url:
-        doc = Document(
-            id=doc_id, transactionId=transactionId or None, kind=kind,
-            filename=url.rsplit("/", 1)[-1] or "link", storage="link", url=url,
-            note=note, createdAt=created,
-        )
+        # Download it so it behaves like an upload — previewable + extractable
+        # (task D8). Falls back to a bare link if the fetch fails or the content
+        # isn't a PDF/image.
+        got = await _download_url_as_file(url, doc_id)
+        if got is not None:
+            doc = Document(
+                id=doc_id, transactionId=transactionId or None, kind=kind,
+                filename=got["filename"], mime=got["mime"], size=got["size"],
+                storage="file", path=got["path"], sha256=got["sha256"],
+                url=url,  # keep the source link for provenance
+                note=note, createdAt=created,
+            )
+        else:
+            doc = Document(
+                id=doc_id, transactionId=transactionId or None, kind=kind,
+                filename=url.rsplit("/", 1)[-1] or "link", storage="link", url=url,
+                note=note, createdAt=created,
+            )
     else:
         raise HTTPException(status_code=422, detail="provide a file or a url")
 
     db.create_document(doc)
-    return _doc_response(doc)
+    out = _doc_response(doc)
+    if url and doc.storage == "link":
+        # the client shows a softer "saved as a link, couldn't download" message
+        out["downloadFailed"] = True
+    return out
 
 
 @app.get("/documents/{id}/file")
@@ -855,6 +1007,87 @@ def change_password(body: LoginRequest, user: User = Depends(get_current_user)):
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
     db.set_user_password(user.id, auth.hash_password(body.password))
     return
+
+
+# --- Tenant authentication (task D1f) --------------------------------------
+# Tenants are a separate table from `users`; they sign in with email OR phone +
+# a password the landlord generated. A `scope=tenant` token only unlocks that
+# tenant's own record + its transactions / documents / maintenance / property.
+
+_TENANT_MIN_PASSWORD = 8
+
+
+def _tenant_auth_response(tenant: Tenant) -> TenantAuthResponse:
+    return TenantAuthResponse(
+        token=auth.create_tenant_token(tenant.id, {"name": tenant.name}),
+        tenant=tenant,
+        mustReset=bool(tenant.mustReset),
+    )
+
+
+@app.post("/auth/tenant-login", response_model=TenantAuthResponse)
+def tenant_login(body: TenantLoginRequest):
+    found = db.find_tenant_by_identifier(body.identifier)
+    if not found or not auth.verify_password(body.password, found[1]):
+        raise HTTPException(status_code=401, detail="Wrong email/phone or password")
+    tenant = db.get_tenant(found[0])
+    assert tenant is not None
+    return _tenant_auth_response(tenant)
+
+
+@app.get("/auth/tenant/me", response_model=TenantAuthResponse)
+def tenant_whoami(tenant: Tenant = Depends(get_current_tenant)):
+    # Re-issues a fresh token — the cheap "refresh" (mirrors /auth/me).
+    return _tenant_auth_response(tenant)
+
+
+@app.post("/auth/tenant/change-password", status_code=204)
+def tenant_change_password(
+    body: TenantChangePasswordRequest, tenant: Tenant = Depends(get_current_tenant)
+):
+    current_hash = db.get_tenant_password_hash(tenant.id)
+    if not current_hash or not auth.verify_password(body.currentPassword, current_hash):
+        raise HTTPException(status_code=401, detail="Current password is wrong")
+    if len(body.newPassword) < _TENANT_MIN_PASSWORD:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Password must be at least {_TENANT_MIN_PASSWORD} characters",
+        )
+    db.set_tenant_password(tenant.id, auth.hash_password(body.newPassword), must_reset=False)
+    return
+
+
+@app.post("/tenants/{id}/reset-password", response_model=TenantPasswordReset)
+def reset_tenant_password(id: str, user: User = Depends(get_current_user)):
+    """Landlord regenerates a tenant's password. Returns the new plaintext ONCE
+    (like the invite link). Owner/member of the tenant's project only."""
+    tenant = db.get_tenant(id)
+    if tenant is None:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    _assert_owns_row(tenant.projectId, user, "Tenant")
+    new_pw = auth.generate_password()
+    db.set_tenant_password(id, auth.hash_password(new_pw), must_reset=True)
+    return TenantPasswordReset(tenantId=id, password=new_pw)
+
+
+# --- Tenant portal data (task D1f) ---------------------------------------------
+# A tenant token reads its own slice through ONE endpoint rather than reusing the
+# landlord list routes (which are `Depends(get_current_user)` and 401 a tenant
+# token). Everything returned is filtered to this tenant server-side.
+
+@app.get("/tenant/bootstrap")
+def tenant_bootstrap(tenant: Tenant = Depends(get_current_tenant)):
+    """{tenant, property, transactions, maintenance} for the signed-in tenant —
+    the tenant-portal equivalent of the landlord's `fetchAllData`."""
+    prop = db.get_property(tenant.propertyId) if tenant.propertyId else None
+    txs = [t for t in db.list_transactions() if t.tenantId == tenant.id]
+    maint = [m for m in db.list_maintenance() if m.tenantId == tenant.id]
+    return {
+        "tenant": tenant.model_dump(),
+        "property": prop.model_dump() if prop else None,
+        "transactions": [t.model_dump() for t in txs],
+        "maintenance": [m.model_dump() for m in maint],
+    }
 
 
 # --- Browser-LLM automation (task E5) -------------------------------------

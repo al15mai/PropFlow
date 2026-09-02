@@ -41,6 +41,47 @@ def test_garbage_token_rejected():
         auth.decode_token("not.a.jwt")
 
 
+# --- tenant auth primitives (task D1f) --------------------------------------
+
+def test_generate_password_shape():
+    pw = auth.generate_password()
+    assert len(pw) == 10
+    # ambiguity-free alphabet: no 0/O/1/l/I
+    assert not (set(pw) & set("0O1lI"))
+    assert auth.generate_password() != auth.generate_password()
+
+
+def test_tenant_token_roundtrip_and_scope():
+    tok = auth.create_tenant_token("t-42", {"name": "Ana"})
+    claims = auth.decode_token(tok)
+    assert claims["sub"] == "tenant:t-42"
+    assert claims["scope"] == "tenant"
+    assert auth.tenant_id_from_claims(claims) == "t-42"
+
+
+def test_tenant_id_from_claims_rejects_landlord_token():
+    landlord = auth.decode_token(auth.create_access_token("u-1", {"email": "a@b.co"}))
+    assert auth.tenant_id_from_claims(landlord) is None
+    # a token that claims scope=tenant but has no prefix is also rejected
+    assert auth.tenant_id_from_claims({"sub": "u-1", "scope": "tenant"}) is None
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("+40 712 345 678", "712345678"),
+        ("0712345678", "712345678"),
+        ("0040712345678", "712345678"),
+        ("0712-345-678", "712345678"),
+        ("(0712) 345 678", "712345678"),
+        ("712345678", "712345678"),
+        ("", ""),
+    ],
+)
+def test_normalize_phone(raw, expected):
+    assert auth.normalize_phone(raw) == expected
+
+
 # --- db layer -----------------------------------------------------------------
 
 def _mk_user(database, email="owner@example.com", pw="hunter2xx"):

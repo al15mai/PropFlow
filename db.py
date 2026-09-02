@@ -169,7 +169,10 @@ class SQLiteDatabase(DatabaseInterface):
                 deposit REAL,
                 status TEXT,
                 rentDueDay INTEGER,
-                projectId TEXT
+                projectId TEXT,
+                passwordHash TEXT,
+                mustReset INTEGER,
+                phoneNormalized TEXT
             )""")
         cur.execute("""
             CREATE TABLE IF NOT EXISTS transactions (
@@ -383,6 +386,16 @@ class SQLiteDatabase(DatabaseInterface):
         self.conn.commit()
 
     # --- Tenants ---
+    @staticmethod
+    def _row_to_tenant(row: sqlite3.Row) -> Tenant:
+        """Row -> Tenant, deriving `hasLogin` (a password hash exists) and
+        coercing `mustReset` to a real bool. `passwordHash` / `phoneNormalized`
+        are dropped by the model's `extra = "ignore"`."""
+        d = {k: row[k] for k in row.keys()}
+        d["hasLogin"] = bool(d.get("passwordHash"))
+        d["mustReset"] = bool(d.get("mustReset"))
+        return Tenant(**d)
+
     def list_tenants(
         self,
         propertyId: Optional[str] = None,
@@ -406,16 +419,18 @@ class SQLiteDatabase(DatabaseInterface):
         if clauses:
             q += " WHERE " + " AND ".join(clauses)
         rows = cur.execute(q, params).fetchall()
-        return [Tenant(**self._row_to_dict(r)) for r in rows]
+        return [self._row_to_tenant(r) for r in rows]
 
     def get_tenant(self, id: str) -> Optional[Tenant]:
         row = self._cursor().execute("SELECT * FROM tenants WHERE id = ?", (id,)).fetchone()
-        return Tenant(**self._row_to_dict(row)) if row else None
+        return self._row_to_tenant(row) if row else None
 
     def create_tenant(self, t: Tenant) -> Tenant:
+        from auth import normalize_phone
+
         cur = self._cursor()
         cur.execute(
-            "INSERT INTO tenants (id,propertyId,name,email,phone,leaseStart,leaseEnd,deposit,status,rentDueDay,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO tenants (id,propertyId,name,email,phone,leaseStart,leaseEnd,deposit,status,rentDueDay,projectId,phoneNormalized) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 t.id,
                 t.propertyId,
@@ -428,6 +443,7 @@ class SQLiteDatabase(DatabaseInterface):
                 t.status,
                 t.rentDueDay,
                 t.projectId,
+                normalize_phone(t.phone or ""),
             ),
         )
         assert self.conn is not None
@@ -435,14 +451,18 @@ class SQLiteDatabase(DatabaseInterface):
         return t
 
     def update_tenant(self, id: str, t: Tenant) -> Tenant:
+        from auth import normalize_phone
+
         cur = self._cursor()
+        # Password / mustReset are NOT touched here — the auth routes own those.
         cur.execute(
-            "UPDATE tenants SET propertyId=?,name=?,email=?,phone=?,leaseStart=?,leaseEnd=?,deposit=?,status=?,rentDueDay=?,projectId=COALESCE(?,projectId) WHERE id=?",
+            "UPDATE tenants SET propertyId=?,name=?,email=?,phone=?,phoneNormalized=?,leaseStart=?,leaseEnd=?,deposit=?,status=?,rentDueDay=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 t.propertyId,
                 t.name,
                 t.email,
                 t.phone,
+                normalize_phone(t.phone or ""),
                 t.leaseStart,
                 t.leaseEnd,
                 t.deposit,
@@ -456,13 +476,71 @@ class SQLiteDatabase(DatabaseInterface):
             raise KeyError("Tenant not found")
         assert self.conn is not None
         self.conn.commit()
-        return t
+        return self.get_tenant(id) or t
 
     def delete_tenant(self, id: str) -> None:
         cur = self._cursor()
         cur.execute("DELETE FROM tenants WHERE id=?", (id,))
         assert self.conn is not None
         self.conn.commit()
+
+    # --- Tenant authentication (task D1f) ---
+
+    def find_tenant_by_identifier(self, identifier: str) -> Optional[tuple[str, str, bool]]:
+        """(tenant_id, passwordHash, mustReset) for a login attempt where
+        `identifier` matches the tenant's email (case-insensitive) OR their phone
+        (normalized). None if no tenant matches or the match has no password set.
+        Ambiguous matches (two tenants, same phone) return None — the landlord
+        must disambiguate by giving them distinct contact details."""
+        from auth import normalize_phone
+
+        ident = identifier.strip()
+        rows = self._cursor().execute(
+            "SELECT id, passwordHash, mustReset FROM tenants "
+            "WHERE lower(email) = lower(?) OR (phoneNormalized != '' AND phoneNormalized = ?)",
+            (ident, normalize_phone(ident)),
+        ).fetchall()
+        if len(rows) != 1:
+            return None
+        r = rows[0]
+        if not r["passwordHash"]:
+            return None
+        return (r["id"], r["passwordHash"], bool(r["mustReset"]))
+
+    def get_tenant_password_hash(self, tenant_id: str) -> Optional[str]:
+        row = self._cursor().execute(
+            "SELECT passwordHash FROM tenants WHERE id = ?", (tenant_id,)
+        ).fetchone()
+        return row["passwordHash"] if row and row["passwordHash"] else None
+
+    def set_tenant_password(self, tenant_id: str, password_hash: str, must_reset: bool) -> None:
+        cur = self._cursor()
+        cur.execute(
+            "UPDATE tenants SET passwordHash = ?, mustReset = ? WHERE id = ?",
+            (password_hash, 1 if must_reset else 0, tenant_id),
+        )
+        if cur.rowcount == 0:
+            raise KeyError("Tenant not found")
+        assert self.conn is not None
+        self.conn.commit()
+
+    def list_account_holder_tenants(self, project_id: Optional[str]) -> List[Dict[str, Any]]:
+        """[{id, name, email, phone, mustReset}] for tenants that have a login —
+        for the landlord's "who can sign in" view (task D9). Project-scoped the
+        same lenient way as `list_tenants`."""
+        proj_clause, proj_params = self._project_filter(project_id)
+        q = "SELECT id, name, email, phone, mustReset FROM tenants WHERE passwordHash IS NOT NULL AND passwordHash != ''"
+        params: List[Any] = []
+        if proj_clause:
+            q += " AND " + proj_clause
+            params.extend(proj_params)
+        q += " ORDER BY name"
+        rows = self._cursor().execute(q, params).fetchall()
+        return [
+            {"id": r["id"], "name": r["name"], "email": r["email"],
+             "phone": r["phone"], "mustReset": bool(r["mustReset"])}
+            for r in rows
+        ]
 
     # --- Transactions ---
     def list_transactions(self, **filters) -> List[Transaction]:
@@ -663,6 +741,16 @@ class SQLiteDatabase(DatabaseInterface):
         return [Alert(**self._row_to_dict(r)) for r in rows]
 
     # --- Settings ---
+    def get_settings(self) -> Optional[LandlordSettings]:
+        """The single landlord-settings row (id=1), or None if never saved."""
+        cur = self._cursor()
+        row = cur.execute("SELECT * FROM settings WHERE id = 1").fetchone()
+        if row is None:
+            return None
+        d = self._row_to_dict(row)
+        d.pop("id", None)
+        return LandlordSettings(**d)
+
     def save_settings(self, s: LandlordSettings) -> LandlordSettings:
         cur = self._cursor()
         cur.execute(

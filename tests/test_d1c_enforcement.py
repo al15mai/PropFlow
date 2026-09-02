@@ -97,3 +97,27 @@ def test_settings_is_owner_only(client):
 
     client.set_token(client.owner_token)
     assert client.post("/settings", json=body).status_code == 200
+
+
+def test_get_settings_blank_before_save_then_reads_back(client):
+    """D7: GET /settings returns blanks (not a dummy profile) before anything is
+    saved, and reads back exactly what POST stored."""
+    client.set_token(client.owner_token)
+
+    blank = client.get("/settings")
+    assert blank.status_code == 200
+    assert blank.json()["displayName"] == ""
+    assert blank.json()["currency"] == "RON"
+
+    body = {"displayName": "Real Name", "email": "real@x.co", "phone": "0712345678",
+            "companyName": "Real Co", "currency": "EUR", "language": "en"}
+    assert client.post("/settings", json=body).status_code == 200
+
+    got = client.get("/settings")
+    assert got.status_code == 200
+    assert got.json() == body
+
+
+def test_get_settings_requires_auth(client):
+    client.set_token(None)
+    assert client.get("/settings").status_code == 401
