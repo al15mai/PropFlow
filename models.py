@@ -80,6 +80,10 @@ class Transaction(BaseModel):
     paymentMethod: PaymentMethod
     isReimbursable: Optional[bool] = False
     isPaid: Optional[bool] = False
+    # Reimbursable expense only: pay this bill LAST in the fund allocator, after
+    # all rent + non-deferred bills (task D11 — the landlord lets it ride to the
+    # next cycle). Legacy rows leave it null / falsy.
+    deferAllocation: Optional[bool] = False
     # Multi-currency (task A4). Legacy rows leave these null and are treated as base (RON).
     currency: Optional[str] = None          # currency `amount` is denominated in
     fxRate: Optional[float] = None          # RON (base) per 1 unit of `currency`

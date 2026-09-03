@@ -188,6 +188,7 @@ class SQLiteDatabase(DatabaseInterface):
                 paymentMethod TEXT,
                 isReimbursable INTEGER,
                 isPaid INTEGER,
+                deferAllocation INTEGER,
                 currency TEXT,
                 fxRate REAL,
                 amountBase REAL,
@@ -597,7 +598,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,isPaid,currency,fxRate,amountBase,maintenanceId,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO transactions (id,date,amount,type,category,subcategory,description,propertyId,tenantId,paymentMethod,isReimbursable,isPaid,deferAllocation,currency,fxRate,amountBase,maintenanceId,projectId) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 tx.id,
                 tx.date,
@@ -611,6 +612,7 @@ class SQLiteDatabase(DatabaseInterface):
                 tx.paymentMethod,
                 int(bool(tx.isReimbursable)),
                 int(bool(tx.isPaid)),
+                int(bool(tx.deferAllocation)),
                 currency,
                 fx_rate,
                 amount_base,
@@ -628,7 +630,7 @@ class SQLiteDatabase(DatabaseInterface):
         currency, fx_rate, amount_base = self._currency_fields(tx)
         tx.fxRate, tx.amountBase = fx_rate, amount_base
         cur.execute(
-            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,isPaid=?,currency=?,fxRate=?,amountBase=?,maintenanceId=?,projectId=COALESCE(?,projectId) WHERE id=?",
+            "UPDATE transactions SET date=?,amount=?,type=?,category=?,subcategory=?,description=?,propertyId=?,tenantId=?,paymentMethod=?,isReimbursable=?,isPaid=?,deferAllocation=?,currency=?,fxRate=?,amountBase=?,maintenanceId=?,projectId=COALESCE(?,projectId) WHERE id=?",
             (
                 tx.date,
                 tx.amount,
@@ -641,6 +643,7 @@ class SQLiteDatabase(DatabaseInterface):
                 tx.paymentMethod,
                 int(bool(tx.isReimbursable)),
                 int(bool(tx.isPaid)),
+                int(bool(tx.deferAllocation)),
                 currency,
                 fx_rate,
                 amount_base,

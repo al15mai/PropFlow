@@ -71,6 +71,25 @@ def test_bool_flags_are_persisted_as_int_and_coerced_back(database, db_path):
     assert by_id["b"].isReimbursable is False and by_id["b"].isPaid is False
 
 
+def test_defer_allocation_roundtrip(database, db_path):
+    database.create_transaction(mk(id="a", deferAllocation=True))
+    database.create_transaction(mk(id="b"))  # default False
+
+    raw = sqlite3.connect(db_path)
+    stored = dict(raw.execute("SELECT id, deferAllocation FROM transactions"))
+    raw.close()
+    assert stored["a"] == 1
+    assert stored["b"] == 0
+
+    by_id = {t.id: t for t in database.list_transactions()}
+    assert by_id["a"].deferAllocation is True
+    assert by_id["b"].deferAllocation is False
+
+    # update clears it
+    database.update_transaction("a", mk(id="a", deferAllocation=False))
+    assert database.get_transaction("a").deferAllocation is False
+
+
 def test_none_description_stored_as_empty_string(database, db_path):
     database.create_transaction(mk(id="a", description=None))
     raw = sqlite3.connect(db_path)
