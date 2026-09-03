@@ -92,31 +92,60 @@ def _client_for(provider: str):
 _last_ready: dict = {}
 
 
-def run_text(func: Callable, *, provider: str | None = None, timeout_s: float | None = None):
+def run_text(func: Callable, *, provider: str | None = None, timeout_s: float | None = None,
+             _retry: bool = True):
     """Run ``func(client)`` on the text provider's dedicated worker thread.
 
     ``func`` gets the client and returns whatever the caller needs; it must be
     a whole task (one ask + parse), not a partial step.
+
+    If the task fails and the client is no longer usable (page/tab/browser died,
+    session dropped) the cached client is **discarded on the worker thread** and
+    the task is retried once against a freshly launched browser. Without this a
+    single wedged page would fail every subsequent request until a full task
+    timeout or a process restart — the failure mode that made the composer look
+    permanently "unavailable".
     """
     provider = provider or text_provider()
     worker = _worker_for(provider)
     budget = timeout_s if timeout_s is not None else env_float("AI_TASK_TIMEOUT_S", 300.0)
+
+    # Set by the worker-thread task when it throws away a dead client; read back
+    # here (same thread hop as `worker.run`) to decide whether a retry is worth it.
+    dropped = {"client": False}
 
     def _task():
         client = _client_for(provider)
         try:
             result = func(client)
         except Exception:
-            # readiness is refreshed on the worker thread only — safe here
+            # readiness + teardown both run on the worker thread — safe here
+            still_ok = False
             try:
-                _last_ready[provider] = client.is_ready()
+                still_ok = client.is_ready()
             except Exception:
-                _last_ready[provider] = False
+                still_ok = False
+            _last_ready[provider] = still_ok
+            if not still_ok:
+                # the client is done — close it and drop it so `_client_for`
+                # rebuilds a fresh browser on the next call
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                _clients.pop(provider, None)
+                dropped["client"] = True
             raise
         _last_ready[provider] = True
         return result
 
-    return worker.run(_task, timeout_s=budget)
+    try:
+        return worker.run(_task, timeout_s=budget)
+    except LLMError:
+        if _retry and dropped["client"]:
+            print(f"[llm] {provider}: client was wedged — rebuilt, retrying once")
+            return run_text(func, provider=provider, timeout_s=timeout_s, _retry=False)
+        raise
 
 
 def login(provider: str, timeout_s: int = 300) -> dict:

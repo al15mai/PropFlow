@@ -1224,8 +1224,13 @@ def _ai_error(exc: Exception):
     if isinstance(exc, LLMRateLimited):
         return HTTPException(status_code=503, detail="ai_rate_limited")
     if isinstance(exc, LLMUnavailable):
-        return HTTPException(status_code=503, detail="ai_unavailable")
-    return HTTPException(status_code=503, detail=f"ai_error: {exc}")
+        # Chromium won't launch / isn't installed — not a "try again" case.
+        return HTTPException(status_code=503, detail=f"ai_unavailable: {exc}")
+    # Any other LLMError (browser closed mid-task, composer not found, no answer
+    # within the budget). `providers.run_text` has already rebuilt the browser
+    # and retried once, so this is a real transient failure — the frontend
+    # shows the message and lets the owner retry.
+    return HTTPException(status_code=503, detail=f"ai_transient: {exc}")
 
 
 # A full utility-invoice text layer runs 8–10 KB. Pasting all of it into a
