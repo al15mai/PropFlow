@@ -1217,8 +1217,12 @@ def _ai_error(exc: Exception):
     from llm import LLMNotLoggedIn, LLMRateLimited, LLMUnavailable
 
     # One line in the server log so "AI unavailable" in the UI is diagnosable
-    # without attaching a debugger (E5c acceptance criterion).
+    # without attaching a debugger (E5c acceptance criterion). Full traceback
+    # too — an empty-message error (e.g. a bare NotImplementedError) tells you
+    # nothing without the stack.
+    import traceback
     print(f"[ai] request failed: {type(exc).__name__}: {exc}")
+    traceback.print_exception(type(exc), exc, exc.__traceback__)
     if isinstance(exc, LLMNotLoggedIn):
         return HTTPException(status_code=503, detail="ai_not_logged_in")
     if isinstance(exc, LLMRateLimited):

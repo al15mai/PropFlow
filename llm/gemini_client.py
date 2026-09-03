@@ -94,8 +94,16 @@ class GeminiClient(BrowserLLM):
         except ImportError as e:
             raise LLMUnavailable("playwright is not installed (`uv sync`)") from e
 
-        if self._pw is None:
-            self._pw = sync_playwright().start()
+        try:
+            if self._pw is None:
+                self._pw = sync_playwright().start()
+        except Exception as e:
+            # e.g. a bare NotImplementedError when a selector event loop can't
+            # spawn the driver subprocess (uvicorn --reload on Windows — the
+            # worker thread installs a Proactor loop to prevent this).
+            raise LLMUnavailable(
+                f"could not start the Playwright driver: {type(e).__name__}: {e}"
+            ) from e
         try:
             self._browser = self._pw.chromium.launch_persistent_context(
                 user_data_dir=self._profile,

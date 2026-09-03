@@ -103,8 +103,15 @@ class ChatGPTClient(BrowserLLM):
             from playwright.sync_api import sync_playwright
         except ImportError as e:
             raise LLMUnavailable("playwright is not installed (`uv sync`)") from e
-        if self._pw is None:
-            self._pw = sync_playwright().start()
+        try:
+            if self._pw is None:
+                self._pw = sync_playwright().start()
+        except Exception as e:
+            # bare NotImplementedError when a selector event loop can't spawn
+            # the driver subprocess (uvicorn --reload on Windows).
+            raise LLMUnavailable(
+                f"could not start the Playwright driver: {type(e).__name__}: {e}"
+            ) from e
         try:
             # system Chrome + navigator.webdriver spoof — clears Cloudflare
             # Turnstile on chatgpt.com (bundled Chromium never gets past it).

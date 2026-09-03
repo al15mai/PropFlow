@@ -1,12 +1,14 @@
 """The dedicated-worker-thread primitive (task E5). No browser involved."""
 from __future__ import annotations
 
+import asyncio
+import sys
 import threading
 import time
 
 import pytest
 
-from llm.worker import LLMWorker
+from llm.worker import LLMWorker, _install_subprocess_capable_loop
 
 
 def test_runs_func_and_returns_result():
@@ -65,3 +67,31 @@ def test_on_wedge_callback_fires():
     with pytest.raises(TimeoutError):
         w.run(lambda: time.sleep(5), timeout_s=0.2)
     assert hits == [1]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows event-loop policy only")
+def test_worker_thread_gets_a_subprocess_capable_loop_under_selector_policy(monkeypatch):
+    """`uvicorn --reload` sets a process-wide WindowsSelectorEventLoopPolicy;
+    a selector loop can't spawn Playwright's driver (bare NotImplementedError).
+    The worker thread must end up on a Proactor loop regardless."""
+    monkeypatch.setattr(
+        asyncio, "get_event_loop_policy", lambda: asyncio.WindowsSelectorEventLoopPolicy()
+    )
+    w = LLMWorker("t7")
+
+    def _probe():
+        _install_subprocess_capable_loop()
+        loop = asyncio.new_event_loop()
+        try:
+            return type(loop).__name__
+        finally:
+            loop.close()
+
+    assert w.run(_probe) == "ProactorEventLoop"
+
+
+def test_install_loop_helper_is_a_noop_off_windows(monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("covered by the win32 test above")
+    # must not raise on Linux/macOS
+    _install_subprocess_capable_loop()

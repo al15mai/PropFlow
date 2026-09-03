@@ -19,12 +19,47 @@ match (can't go through Playwright either). The next task starts clean.
 """
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import os
 import queue
 import subprocess
+import sys
 import threading
 from typing import Callable
+
+
+def _install_subprocess_capable_loop() -> None:
+    """Give THIS thread an event loop that can spawn child processes.
+
+    Playwright's sync API starts its Node driver with
+    ``asyncio.create_subprocess_exec``. On Windows that needs a
+    ``ProactorEventLoop`` — but ``uvicorn --reload`` calls
+    ``asyncio.set_event_loop_policy(WindowsSelectorEventLoopPolicy())``
+    process-wide (it spawns a file-watcher subprocess), and a **selector** loop
+    raises a bare ``NotImplementedError`` the instant Playwright tries to
+    launch its driver. That was the whole "AI unavailable / NotImplementedError"
+    bug under ``--reload``.
+
+    Playwright builds its loop with ``asyncio.new_event_loop()``, which asks the
+    global *policy* — not this thread's current loop — so we both (a) create a
+    Proactor loop and set it as this worker thread's loop, and (b) swap the
+    global policy to the Proactor one. (b) is safe here: uvicorn's server
+    subprocess (where our app runs) never spawns anything through asyncio; only
+    the separate reloader parent process does, and it has its own interpreter.
+
+    No-op off Windows."""
+    if sys.platform != "win32":
+        return
+    proactor_policy = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if proactor_policy is None:  # pragma: no cover - very old Python
+        return
+    try:
+        if not isinstance(asyncio.get_event_loop_policy(), proactor_policy):
+            asyncio.set_event_loop_policy(proactor_policy())
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    except Exception as e:  # pragma: no cover - defensive
+        print(f"[llm] could not install a Proactor event loop: {e}")
 
 DEFAULT_TASK_TIMEOUT_S = 600.0
 
@@ -78,6 +113,9 @@ class LLMWorker:
         self._queue: "queue.Queue" = queue.Queue()
 
     def _loop(self, work_queue: "queue.Queue") -> None:
+        # This thread owns the browser for its whole life; give it a
+        # subprocess-capable event loop once, before any Playwright call.
+        _install_subprocess_capable_loop()
         while True:
             try:
                 func, fut = work_queue.get(timeout=0.5)
